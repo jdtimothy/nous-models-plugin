@@ -1,509 +1,384 @@
 /**
  * Hermes Desktop Plugin: Nous Models & Pricing
  *
- * Statusbar chip shows a live model count. Click it → a popup panel
+ * Statusbar chip shows a live model count. Click it -> a popup panel
  * lists every Nous Portal model with current + original pricing, the
- * discount %, context length, and free/paid-tier badges.
+ * discount percent, and a "now" tag for the active model.
  *
- * Each model row is CLICKABLE:
- *   - primary click sets it as the current SESSION model
- *   - a "default" button sets it as the profile default model
- *
- * Data is LIVE — fetched from the public Nous endpoints directly from
- * the browser every 10 minutes (both allow CORS). No pricing is baked
- * into this file.
- *
- * IMPORTANT (Tailwind): plugin files load at RUNTIME, after the app's
- * Tailwind build-time scan, so arbitrary-value utility classes that
- * appear ONLY here (h-[320px], w-[52px], text-[0.8125rem], …) are NOT
- * compiled into the app CSS. Use inline `style={{}}` for every custom
- * dimension/size; reserve utility classes for standard ones (flex,
- * items-center, gap-2, rounded-md, truncate, …).
- *
- * Model switching uses the same `config.set` gateway RPC as the app's
- * own model picker:
- *   host.request('config.set', { session_id, key: 'model',
- *     value: '<id> --provider <provider> [--global|--session]' })
- *
- * Plain ESM loaded uncompiled: UI is jsx() calls, NOT JSX syntax; only
- * @hermes/plugin-sdk, react, react/jsx-runtime resolve.
+ * No sidebar pane. No build step. No Python backend.
+ * Fetches live data from the Nous Portal directly.
  */
-import {
-  cn,
-  haptic,
-  host,
-  Popover,
-  PopoverContent,
-  PopoverTrigger,
-  STATUSBAR_AREAS,
-  usePluginI18n,
-  useQuery,
-  useValue
-} from '@hermes/plugin-sdk'
-import { jsx, jsxs } from 'react/jsx-runtime'
 
-const ID = 'nous-models'
-const PROVIDER = 'nous'
+const { useState, useEffect, useRef, useCallback, useMemo } = React
+const { Popover, PopoverContent, PopoverTrigger } = ctx.ui
+const host = ctx.host
+const jsx = React.jsx
+const { atom, computed } = ctx.ui
 
-const CATALOG_URL = 'https://hermes-agent.nousresearch.com/docs/api/model-catalog.json'
-const PRICING_URL = 'https://inference-api.nousresearch.com/v1/models'
+// ---- Constants ----
+const PANEL_W = 680
+const ROW_H = 38
+const BODY_H = 300
 
-// ---------------------------------------------------------------------------
-// Data fetching — live from the public Nous endpoints (React Query)
-// ---------------------------------------------------------------------------
-
-function formatPrice(tokenPrice) {
-  if (tokenPrice == null) return '—'
-  const perM = Number(tokenPrice) * 1_000_000
-  if (!isFinite(perM)) return '—'
-  if (perM === 0) return '$0.00'
-  if (perM < 0.01) return `$${perM.toFixed(4)}`
-  if (perM < 1) return `$${perM.toFixed(2)}`
-  return `$${perM.toFixed(2)}`
+// ---- API helpers ----
+async function fetchJSON(url) {
+  const r = await fetch(url, { headers: { Accept: 'application/json' } })
+  if (!r.ok) throw new Error(`HTTP ${r.status} from ${url}`)
+  return r.json()
 }
 
-function calcDiscount(cur, orig) {
-  if (cur == null || orig == null) return null
-  const c = Number(cur), o = Number(orig)
-  if (!isFinite(c) || !isFinite(o) || o === 0) return null
-  return Math.round((1 - c / o) * 100 * 10) / 10
+function buildModelBundle() {
+  // These two public endpoints together give us everything we need:
+  //   model-catalog.json -> curated Nous Portal model IDs + provider display info
+  //   /v1/models -> current pricing, original pricing, context_length, :free variants
+  return { urls: { catalog: 'https://hermes-agent.nousresearch.com/docs/api/model-catalog.json', models: 'https://inference-api.nousresearch.com/v1/models' } }
 }
 
-function baseId(id) {
-  for (const s of [':free', ':US', ':batch']) {
-    if (id.endsWith(s)) return id.slice(0, -s.length)
-  }
-  return id
-}
+function processBundle(catalog, v1models) {
+  const byId = new Map(v1models.data.map(m => [m.id, m]))
+  const catalogIds = new Set((catalog.models || []).map(m => m.id))
 
-async function fetchModels() {
-  const [catResp, priceResp] = await Promise.all([
-    fetch(CATALOG_URL, { headers: { Accept: 'application/json' } }),
-    fetch(PRICING_URL, { headers: { Accept: 'application/json' } })
-  ])
-  if (!catResp.ok) throw new Error(`catalog HTTP ${catResp.status}`)
-  if (!priceResp.ok) throw new Error(`pricing HTTP ${priceResp.status}`)
+  // derive tier from the :free counterpart
+  const isFree = (id) => byId.has(id + ':free')
 
-  const [catalog, pricingData] = await Promise.all([catResp.json(), priceResp.json()])
-
-  const catalogModels = catalog?.providers?.nous?.models ?? []
-  const allModels = pricingData?.data ?? pricingData ?? []
-
-  const byId = new Map()
-  const freeVariantIds = new Set()
-  for (const m of allModels) {
-    const mid = m && m.id
-    if (!mid) continue
-    byId.set(mid, m)
-    if (mid.endsWith(':free')) freeVariantIds.add(baseId(mid))
-  }
-
-  const rows = catalogModels
-    .filter(e => e && e.id)
-    .map(e => {
-      const mid = e.id
-      const pm = byId.get(mid) || {}
-      const pricing = (pm && pm.pricing) || {}
-      const original = (pricing && pricing.original) || {}
-
-      const dIn = calcDiscount(pricing.prompt, original.prompt)
-      const dOut = calcDiscount(pricing.completion, original.completion)
-      let avg = null
-      if (dIn != null && dOut != null) avg = Math.round(((dIn + dOut) / 2) * 10) / 10
-      else if (dIn != null) avg = dIn
-      else if (dOut != null) avg = dOut
-
-      let name = mid.includes('/') ? mid.split('/')[1] : mid
-      if (name.startsWith('~')) name = name.slice(1)
-
+  const rows = (catalog.models || [])
+    .map(m => {
+      const v1 = byId.get(m.id)
+      if (!v1) return null
+      const inp = v1.pricing?.prompt ?? null
+      const out = v1.pricing?.completion ?? null
+      const orig = v1.original_pricing ?? null
+      let disc = null
+      if (inp != null && orig?.prompt != null && orig.prompt > 0) {
+        disc = Math.round((1 - inp / orig.prompt) * 100)
+        if (disc < 0) disc = 0
+        if (disc > 99) disc = 99
+      }
       return {
-        id: mid,
-        name,
-        input_per_1m: formatPrice(pricing.prompt),
-        output_per_1m: formatPrice(pricing.completion),
-        input_original_per_1m: formatPrice(original.prompt),
-        output_original_per_1m: formatPrice(original.completion),
-        discount_avg_pct: avg,
-        is_free: freeVariantIds.has(mid)
+        id: m.id,
+        name: m.name || m.id.split('/').pop(),
+        provider: m.provider || m.id.split('/')[0],
+        tier: isFree(m.id) ? 'free' : 'std',
+        badge: isFree(m.id) ? 'Free' : 'Std',
+        input: inp,
+        output: out,
+        discount: disc,
+        ctx: v1.context_length ?? null,
       }
     })
+    .filter(Boolean)
+    .sort((a, b) => {
+      if (a.tier === 'free' && b.tier !== 'free') return -1
+      if (a.tier !== 'free' && b.tier === 'free') return 1
+      if (a.discount == null && b.discount == null) return 0
+      if (a.discount == null) return 1
+      if (b.discount == null) return -1
+      return (b.discount ?? 0) - (a.discount ?? 0)
+    })
 
-  rows.sort((a, b) => {
-    if (a.is_free !== b.is_free) return a.is_free ? -1 : 1
-    const da = a.discount_avg_pct ?? -1
-    const db = b.discount_avg_pct ?? -1
-    if (db !== da) return db - da
-    return a.name.localeCompare(b.name)
-  })
+  const freeCount = rows.filter(r => r.tier === 'free').length
+  const discounts = rows.map(r => r.discount).filter(v => v != null)
+  const avgDisc = discounts.length ? Math.round(discounts.reduce((a, b) => a + b, 0) / discounts.length) : 0
 
-  const withDisc = rows.filter(r => r.discount_avg_pct != null).map(r => r.discount_avg_pct)
-  const stats = {
-    total: rows.length,
-    free: rows.filter(r => r.is_free).length,
-    avg_discount_pct: withDisc.length ? Math.round((withDisc.reduce((a, b) => a + b, 0) / withDisc.length) * 10) / 10 : null,
-    fetched_at: new Date().toISOString()
-  }
-
-  return { stats, models: rows }
+  return { models: rows, freeCount, total: rows.length, avgDiscount: avgDisc, fetchedAt: Date.now() }
 }
 
-function useModels() {
-  return useQuery({
-    queryKey: [ID, 'models'],
-    queryFn: fetchModels,
-    staleTime: 10 * 60 * 1000,
-    refetchInterval: 10 * 60 * 1000,
-    retry: 2
-  })
+// ---- Focused session id from the desktop SDK ----
+function getFocusedSessionId() {
+  try {
+    const raw = host.state.activeSessionId?.get?.() ?? host.state.activeSessionId ?? null
+    if (raw) return String(raw).trim()
+  } catch {}
+  return null
 }
 
-// ---------------------------------------------------------------------------
-// Model switching — mirrors the app's composer (use-model-controls.ts)
-// ---------------------------------------------------------------------------
+// ---- Format a compact price string ----
+function fmtPrice(p) {
+  if (p == null) return '—'
+  if (p === 0) return 'free'
+  if (p < 0.0001) return `$${(p * 1e6).toFixed(2)}/1M`
+  if (p < 0.01) return `$${(p * 1e3).toFixed(2)}/K`
+  return `$${p.toFixed(p < 1 ? 4 : 2)}`
+}
 
-async function setModel({ model, provider = PROVIDER, scope }) {
-  // scope: 'session' | 'global'
-  const sessionId = host.state.focusedSessionId.get() || host.state.activeSessionId.get()
-  const flag = scope === 'global' ? '--global' : '--session'
-  const params = {
+// ---- Switch model via gateway RPC (same path the app's own picker uses) ----
+async function setModel({ model, scope = 'session' }) {
+  const provider = 'nous'
+  const sid = getFocusedSessionId()
+  if (!sid) throw new Error('no focused session — open a chat and try again')
+  const rawValue = scope === 'global'
+    ? `${model} --provider ${provider} --global`
+    : `${model} --provider ${provider} --session`
+  const res = await host.request('config.set', {
+    session_id: sid,
     key: 'model',
-    value: `${model} --provider ${provider} ${flag}`
+    value: rawValue,
+  })
+  // config.set returns { value, deferred? } on success
+  return res
+}
+
+// ---- Sound via haptic (same mechanism the app uses for native tap feedback) ----
+function haptic(name) {
+  try { host.haptic?.(name) } catch {}
+}
+
+// ---- Component: one model row ----
+function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
+  const rowStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+    height: `${ROW_H}px`,
+    padding: '0 12px',
+    borderRadius: '6px',
+    cursor: 'pointer',
+    backgroundColor: isCurrent ? 'var(--ui-accent-muted, rgba(59,130,246,0.12))' : 'transparent',
+    transition: 'background-color 80ms',
   }
-  // Always pass the session id when we have one; the gateway applies a
-  // session-scoped switch to that live session (deferring a mid-turn swap
-  // to the next turn). `--global` persists to config.yaml regardless.
-  if (sessionId) params.session_id = sessionId
-  return host.request('config.set', params)
-}
+  const nameStyle = {
+    flex: '1 1 auto',
+    minWidth: 0,
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+    whiteSpace: 'nowrap',
+    fontSize: '13px',
+    fontWeight: isCurrent ? 600 : 400,
+    color: 'var(--foreground)',
+  }
+  const badgeBase = {
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '18px',
+    padding: '0 6px',
+    borderRadius: '9999px',
+    fontSize: '10px',
+    fontWeight: 700,
+    lineHeight: 1,
+    flexShrink: 0,
+  }
+  const badgeFree = { ...badgeBase, backgroundColor: 'rgba(34,197,94,0.15)', color: '#16a34a' }
+  const badgeStd  = { ...badgeBase, backgroundColor: 'rgba(148,163,184,0.15)', color: '#94a3b8' }
 
-// ---------------------------------------------------------------------------
-// UI helpers
-// ---------------------------------------------------------------------------
-
-const ROW_H = 28            // px, per row
-const TIER_W = 52           // px
-const PRICE_W = 52          // px
-const DISC_W = 42           // px
-const ACTION_W = 56         // px (hover "default" button)
-const PANEL_W = 400         // px
-
-function DiscountBadge({ pct }) {
-  if (pct == null) return jsx('span', { children: '—' })
-  const color = pct >= 50 ? 'var(--ui-accent)'
-    : pct >= 20 ? 'var(--ui-text-secondary)'
-    : 'var(--ui-text-tertiary)'
-  return jsx('span', {
-    style: { color, fontFamily: 'var(--font-mono)', fontSize: '12px' },
-    children: `${Math.round(pct)}%`
-  })
-}
-
-function TierBadge({ isFree }) {
-  if (isFree) return jsx('span', {
-    style: {
-      display: 'inline-flex',
-      height: '20px',
-      minWidth: '28px',
-      alignItems: 'center',
-      justifyContent: 'center',
-      borderRadius: '9999px',
-      border: '1px solid rgba(52,211,153,0.4)',
-      padding: '0 4px',
-      fontSize: '10px',
-      fontWeight: 500,
-      color: '#fff',
-      background: 'rgba(16,185,129,0.9)'
+  return jsx('div', {
+    style: rowStyle,
+    onMouseEnter: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'var(--chrome-action-hover, rgba(255,255,255,0.04))' },
+    onMouseLeave: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'transparent' },
+    onClick: async () => {
+      haptic('tap')
+      try {
+        await onSetSession(model.id)
+      } catch (err) {
+        host.notify({ kind: 'error', message: `Session model switch failed: ${err.message}` })
+      }
     },
-    children: 'Free'
-  })
-  return jsx('span', {
-    style: { fontSize: '10px', color: 'var(--ui-text-tertiary)' },
-    children: 'Std'
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Model row — clickable to switch model
-// ---------------------------------------------------------------------------
-
-function ModelRow({ model, isCurrent, onSwitch }) {
-  return jsxs('div', {
-    role: 'button',
-    tabIndex: 0,
-    style: {
-      display: 'flex',
-      alignItems: 'center',
-      gap: '8px',
-      padding: '5px 6px',
-      borderRadius: '6px',
-      cursor: 'pointer',
-      height: `${ROW_H}px`,
-      boxSizing: 'border-box'
-    },
-    className: cn(
-      'group transition-colors',
-      'hover:bg-(--chrome-action-hover)',
-      isCurrent && 'bg-(--ui-accent)/8'
-    ),
-    'data-testid': `model-${model.id}`,
-    onClick: () => onSwitch(model, 'session'),
-    onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') onSwitch(model, 'session') },
-    title: `Set as current session model: ${model.id}`,
+    title: `Set "${model.id}" as current session model`,
     children: [
-      jsx(TierBadge, { isFree: model.is_free }),
-
-      // Name
-      jsx('div', {
-        style: { flex: '1 1 0%', minWidth: '0' },
-        children: jsxs('div', {
-          style: { display: 'flex', alignItems: 'center', gap: '4px' },
-          children: [
-            jsx('span', {
-              style: {
-                fontSize: '13px',
-                fontWeight: 500,
-                overflow: 'hidden',
-                textOverflow: 'ellipsis',
-                whiteSpace: 'nowrap',
-                color: isCurrent ? 'var(--ui-accent)' : undefined
-              },
-              children: model.name
-            }),
-            isCurrent ? jsx('span', {
-              style: { fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ui-accent)', flexShrink: 0 },
-              children: 'now'
-            }) : null
-          ]
-        })
+      jsx('span', { style: model.tier === 'free' ? badgeFree : badgeStd, children: model.badge }),
+      jsx('span', { style: nameStyle, children: model.name }),
+      jsx('span', {
+        style: { fontSize: '11px', color: 'var(--muted-foreground)', width: '90px', textAlign: 'right', flexShrink: 0 },
+        children: model.ctx ? `${(model.ctx / 1024).toFixed(0)}k ctx` : '—'
       }),
-
-      // In/Out price
-      jsx('div', {
-        style: { width: `${PRICE_W}px`, textAlign: 'right', fontSize: '12px', fontVariantNumeric: 'tabular-nums', color: 'var(--ui-text-secondary)' },
-        title: `in ${model.input_per_1m} / out ${model.output_per_1m}`,
-        children: `${model.input_per_1m}/${model.output_per_1m}`
+      jsx('span', {
+        style: { fontSize: '11px', color: 'var(--muted-foreground)', width: '64px', textAlign: 'right', flexShrink: 0 },
+        children: model.input == null ? '—' : `$${model.input.toFixed(2)}`
       }),
-
-      // Discount
-      jsx('div', {
-        style: { width: `${DISC_W}px`, textAlign: 'right' },
-        children: jsx(DiscountBadge, { pct: model.discount_avg_pct })
+      jsx('span', {
+        style: { fontSize: '11px', color: 'var(--muted-foreground)', width: '64px', textAlign: 'right', flexShrink: 0 },
+        children: model.output == null ? '—' : `$${model.output.toFixed(2)}`
       }),
-
-      // Hover "default" action
-      jsx('button', {
-        type: 'button',
-        onClick: (e) => { e.stopPropagation(); onSwitch(model, 'global') },
-        title: 'Set as default model (new sessions)',
-        style: {
-          width: `${ACTION_W}px`,
-          flexShrink: 0,
-          borderRadius: '4px',
-          padding: '2px 4px',
-          fontSize: '10px',
-          fontWeight: 500,
-          color: 'var(--ui-text-tertiary)',
-          opacity: 1,
-          transition: 'background-color 100ms, color 100ms'
-        },
-        className: 'hover:bg-(--chrome-action-hover) hover:text-foreground',
-        children: 'default'
-      })
+      jsx('span', {
+        style: { fontSize: '11px', width: '46px', textAlign: 'right', fontWeight: 600, color: model.discount ? 'var(--accent)' : 'var(--muted-foreground)', flexShrink: 0 },
+        children: model.discount == null ? '—' : `-${model.discount}%`
+      }),
+      isCurrent
+        ? jsx('span', {
+            style: { fontSize: '10px', padding: '0 6px', borderRadius: '4px', backgroundColor: 'var(--accent)', color: 'var(--accent-fg, #fff)', fontWeight: 700, height: '18px', lineHeight: '18px', flexShrink: 0 },
+            children: 'now'
+          })
+        : jsx('button', {
+            style: {
+              appearance: 'none', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '4px',
+              background: 'transparent', color: 'var(--ui-text-secondary)', fontSize: '10px',
+              padding: '2px 8px', cursor: 'pointer', flexShrink: 0, lineHeight: '14px'
+            },
+            onClick: async (e) => {
+              e.stopPropagation()
+              haptic('tap')
+              try {
+                await onSetDefault(model.id)
+              } catch (err) {
+                host.notify({ kind: 'error', message: `Default model switch failed: ${err.message}` })
+              }
+            },
+            title: `Set "${model.id}" as profile default`,
+            children: 'default'
+          }),
     ]
   })
 }
 
-// ---------------------------------------------------------------------------
-// Popup panel content
-// ---------------------------------------------------------------------------
+// ---- Component: main popup body ----
+function NousPopup() {
+  const [open, setOpen] = useState(false)
+  const [bundle, setBundle] = useState(null)
+  const [error, setError] = useState(null)
+  const [refreshing, setRefreshing] = useState(false)
+  const currentModelAtom = useMemo(() => atom(String(host.state.model?.get?.() ?? host.state.model ?? '')), [])
+  const currentModel = currentModelAtom.get()
 
-function ModelsPanel() {
-  const t = usePluginI18n(ID)
-  const { data, isLoading, isError, refetch, isFetching } = useModels()
-
-  const currentModel = useValue(host.state.model)
-
-  const models = data?.models ?? []
-  const stats = data?.stats ?? null
-
-  const header = stats ? `${stats.total} models · ${stats.free} free` : ''
-
-  const onSwitch = async (model, scope) => {
-    haptic('tap')
+  const load = useCallback(async () => {
+    setError(null)
     try {
-      await setModel({ model: model.id, scope })
+      const spec = buildModelBundle()
+      const [catalog, v1] = await Promise.all([
+        fetchJSON(spec.urls.catalog),
+        fetchJSON(spec.urls.models),
+      ])
+      const processed = processBundle(catalog, v1)
+      setBundle(processed)
     } catch (err) {
-      host.notify({ kind: 'error', message: `Could not switch to ${model.name} (${scope}): ${err?.message || err}` })
+      setError(err.message)
     }
-  }
+  }, [])
 
+  useEffect(() => { if (open) { void load() } }, [open, load])
+
+  // Refresh every 10 minutes while open
+  useEffect(() => {
+    if (!open) return
+    const id = setInterval(() => { setRefreshing(true); void load().finally(() => setRefreshing(false)) }, 10 * 60 * 1000)
+    return () => clearInterval(id)
+  }, [open, load])
+
+  // Exact current-model match: strip flags from "model --provider nous --session"
   function getCurrentModelSlug() {
     const raw = String(currentModel || '').trim()
-    // Stored value looks like: "provider/model --provider provider --session|--global"
-    const firstSpace = raw.indexOf(' ')
-    const rawId = firstSpace >= 0 ? raw.slice(0, firstSpace) : raw
-    return rawId.toLowerCase()
+    const firstSpace = raw.search(/\s/)
+    const base = firstSpace >= 0 ? raw.slice(0, firstSpace) : raw
+    return base.toLowerCase()
   }
-
   const currentSlug = getCurrentModelSlug()
 
-  return jsxs('div', {
-    style: { display: 'flex', flexDirection: 'column', gap: '4px', width: `${PANEL_W}px` },
-    children: [
-      // Header
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '2px 2px 0' },
-        children: [
-          jsxs('div', {
-            style: { minWidth: '0' },
-            children: [
-              jsx('div', { style: { fontSize: '14px', fontWeight: 600 }, children: t('title') }),
-              jsx('div', {
-                style: { fontSize: '10px', color: 'var(--ui-text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
-                children: stats ? header : t('loading')
-              })
-            ]
-          }),
-          jsx('button', {
-            type: 'button',
-            onClick: () => { haptic('tap'); refetch() },
-            disabled: isFetching,
-            title: t('refreshTip'),
-            style: {
-              display: 'flex', height: '24px', width: '24px', flexShrink: 0,
-              alignItems: 'center', justifyContent: 'center', borderRadius: '6px',
-              color: 'var(--ui-text-secondary)', opacity: isFetching ? 0.5 : 1
-            },
-            className: 'hover:bg-(--chrome-action-hover) hover:text-foreground',
-            children: isFetching ? '…' : '↻'
-          })
-        ]
-      }),
+  // Actions
+  const onSetDefault = useCallback(async (modelId) => {
+    const res = await setModel({ model: modelId, scope: 'global' })
+    if (res?.deferred) {
+      host.notify({ kind: 'info', message: `Default model -> ${modelId} (applies to new sessions)` })
+    }
+  }, [])
+  const onSetSession = useCallback(async (modelId) => {
+    const res = await setModel({ model: modelId, scope: 'session' })
+    if (res?.deferred) {
+      host.notify({ kind: 'info', message: `Session model -> ${modelId} (applies next turn)` })
+    }
+  }, [])
 
-      // Column headers
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '0 6px', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ui-text-tertiary)' },
-        children: [
-          jsx('div', { style: { width: `${TIER_W}px` } }),
-          jsx('div', { style: { flex: '1 1 0%', minWidth: '0' } }),
-          jsx('div', { style: { width: `${PRICE_W}px`, textAlign: 'right' }, children: 'In/Out' }),
-          jsx('div', { style: { width: `${DISC_W}px`, textAlign: 'right' }, children: 'Disc' }),
-          jsx('div', { style: { width: `${ACTION_W}px` } })
-        ]
-      }),
+  const contentStyle = {
+    width: `${PANEL_W}px`,
+    maxWidth: '95vw',
+    backgroundColor: 'var(--card, var(--background))',
+    border: '1px solid var(--ui-stroke-secondary)',
+    borderRadius: '8px',
+    boxShadow: '0 8px 32px rgba(0,0,0,0.35)',
+    overflow: 'hidden',
+  }
 
-      // Body
-      jsx('div', {
-        style: { height: '300px', overflowY: 'auto' },
-        children: isLoading
-          ? jsx('div', { style: { display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' }, children: t('loading') })
-          : isError
-            ? jsx('div', {
-                style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' },
-                children: [
-                  jsx('div', { children: t('error') }),
-                  jsx('button', {
-                    type: 'button',
-                    onClick: () => refetch(),
-                    style: { borderRadius: '6px', border: '1px solid var(--ui-stroke-secondary)', padding: '2px 8px', fontSize: '11px' },
-                    className: 'hover:bg-(--chrome-action-hover)',
-                    children: t('retry')
-                  })
-                ]
-              })
-            : models.length === 0
-              ? jsx('div', { style: { padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' }, children: t('empty') })
-              : jsxs('div', {
-                  style: { display: 'flex', flexDirection: 'column' },
-                  children: models.map(m => {
-                    const baseMid = baseId(m.id)
-                    const baseName = baseMid.split('/')[1]?.toLowerCase() || ''
-                    const isCurrent = currentSlug === baseMid || currentSlug === m.id
-                    return jsx(ModelRow, {
-                      key: m.id,
-                      model: m,
-                      isCurrent,
-                      onSwitch
-                    })
-                  })
+  const headerStyle = {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: '10px 14px',
+    borderBottom: '1px solid var(--ui-stroke-secondary)',
+    gap: '8px',
+  }
+  const titleStyle = { fontSize: '12px', fontWeight: 700, color: 'var(--foreground)', letterSpacing: '0.02em' }
+  const countChipStyle = { fontSize: '10px', padding: '2px 8px', borderRadius: '9999px', backgroundColor: 'var(--ui-stroke-secondary)', color: 'var(--ui-text-secondary)' }
+  const refreshBtnStyle = { appearance: 'none', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '4px', background: 'transparent', color: refreshing ? 'var(--accent)' : 'var(--ui-text-secondary)', cursor: 'pointer', fontSize: '11px', padding: '2px 8px', lineHeight: '16px', opacity: refreshing ? 0.7 : 1, transition: 'opacity 100ms' }
+  const footerStyle = { padding: '6px 14px', borderTop: '1px solid var(--ui-stroke-secondary)', display: 'flex', justifyContent: 'space-between', fontSize: '10px', color: 'var(--muted-foreground)' }
+  const scrollBodyStyle = { height: `${BODY_H}px`, overflowY: 'auto', padding: '6px' }
+  const colHeadStyle = { display: 'flex', alignItems: 'center', height: '22px', padding: '0 12px', fontSize: '10px', fontWeight: 600, color: 'var(--muted-foreground)', textTransform: 'uppercase', letterSpacing: '0.05em', borderBottom: '1px solid var(--ui-stroke-secondary)', marginBottom: '2px' }
+  const colSpacer = { flex: '0 0 40px' }
+
+  return jsx(Popover, { open, onOpenChange: setOpen, children: [
+    jsx(PopoverTrigger, { asChild: true, children:
+      jsx('button', {
+        id: 'nous-models-chip',
+        onClick: () => haptic('tap'),
+        style: {
+          appearance: 'none', border: 'none', background: 'transparent',
+          color: 'var(--ui-text-secondary)', cursor: 'pointer',
+          fontSize: '11px', lineHeight: '20px', height: '20px',
+          padding: '0 8px', borderRadius: '4px',
+          transition: 'background-color 100ms, color 100ms',
+          display: 'inline-flex', alignItems: 'center', gap: '4px',
+        },
+        title: 'Nous Models & Pricing — click to open',
+        children: [
+          jsx('span', { children: bundle ? `${bundle.total}/${bundle.freeCount}` : '...' }),
+          refreshing ? jsx('span', { style: { fontSize: '8px' }, children: '↻' }) : null,
+        ]
+      })
+    }),
+    jsx(PopoverContent, {
+      align: 'end', sideOffset: 6, style: contentStyle,
+      onOpenAutoFocus: (e) => e.preventDefault(),
+      children: [
+        jsx('div', { style: headerStyle, children: [
+          jsx('span', { style: titleStyle, children: 'Nous Portal Models' }),
+          jsx('span', { style: { display: 'flex', gap: '6px', alignItems: 'center' } , children: [
+            jsx('span', { style: countChipStyle, children: bundle ? `${bundle.total} models / ${bundle.freeCount} free` : 'loading…' }),
+            jsx('button', { style: refreshBtnStyle, onClick: () => { setRefreshing(true); void load().finally(() => setRefreshing(false)) }, disabled: refreshing, children: refreshing ? 'refreshing…' : 'refresh' }),
+          ]}),
+        ]}),
+
+        // Column headers
+        jsx('div', { style: { ...colHeadStyle, display: 'flex', gap: '8px', padding: '0 12px' }, children: [
+          jsx('span', { style: { width: '36px', textAlign: 'center' }, children: 'Tier' }),
+          jsx('span', { style: { flex: 1 }, children: 'Name' }),
+          jsx('span', { style: { width: '70px', textAlign: 'center' }, children: 'Context' }),
+          jsx('span', { style: { width: '62px', textAlign: 'right' }, children: 'In $/1M' }),
+          jsx('span', { style: { width: '62px', textAlign: 'right' }, children: 'Out $/1M' }),
+          jsx('span', { style: { width: '46px', textAlign: 'right' }, children: 'Disc.' }),
+          jsx('span', { style: colSpacer }),
+        ]}),
+
+        error
+          ? jsx('div', { style: { ...scrollBodyStyle, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--destructive, #ef4444)', fontSize: '12px', padding: '24px' }, children: `Failed to load: ${error}` })
+          : !bundle
+            ? jsx('div', { style: { ...scrollBodyStyle, display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--muted-foreground)', fontSize: '12px' }, children: 'Loading models…' })
+            : jsx('div', { style: scrollBodyStyle, children: bundle.models.map(m =>
+                jsx(ModelRow, {
+                  key: m.id,
+                  model: m,
+                  isCurrent: m.id === currentSlug,
+                  onSetDefault,
+                  onSetSession,
                 })
-      }),
+              )
+            }),
 
-      // Footer
-      jsxs('div', {
-        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--ui-stroke-secondary)', padding: '4px 2px 0', fontSize: '9px', color: 'var(--ui-text-tertiary)' },
-        children: [
-          jsx('span', {
-            children: stats && stats.avg_discount_pct != null ? `Avg discount ${Math.round(stats.avg_discount_pct)}%` : ''
-          }),
-          jsx('span', { children: 'click model → session · hover "default" → new sessions' })
-        ]
-      })
-    ]
-  })
+        jsx('div', { style: footerStyle, children: [
+          jsx('span', { children: `avg discount: ${bundle ? bundle.avgDiscount : '—'}%` }),
+          jsx('span', { children: bundle ? new Date(bundle.fetchedAt).toLocaleTimeString() : '' }),
+        ]}),
+      ]
+    }),
+  ] })
 }
 
-// ---------------------------------------------------------------------------
-// Statusbar chip — opens the popup on click
-// ---------------------------------------------------------------------------
-
-function ModelsChip() {
-  const t = usePluginI18n(ID)
-  const { data } = useModels()
-  const stats = data?.stats ?? null
-  const chipLabel = stats ? `${stats.total} models` : 'Nous'
-
-  return jsx(Popover, {
-    children: [
-      jsx(PopoverTrigger, {
-        asChild: true,
-        children: jsx('button', {
-          type: 'button',
-          title: t('chipTip'),
-          style: { display: 'flex', height: '100%', alignItems: 'center', gap: '4px', padding: '0 6px', fontSize: '11px', color: 'var(--ui-text-secondary)' },
-          className: 'transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
-          children: [
-            jsx('span', { style: { color: 'var(--ui-accent)' }, children: '◈' }),
-            jsx('span', { children: chipLabel })
-          ]
-        })
-      }),
-      jsx(PopoverContent, {
-        align: 'end',
-        side: 'top',
-        sideOffset: 6,
-        style: { width: 'auto', padding: '8px' },
-        children: jsx(ModelsPanel, {})
-      })
-    ]
-  })
-}
-
-// ---------------------------------------------------------------------------
-// Registration
-// ---------------------------------------------------------------------------
-
+// ---- Register: statusbar chip only (no sidebar pane) ----
 export default {
-  id: ID,
+  id: 'nous-models',
   name: 'Nous Models & Pricing',
   register(ctx) {
-    ctx.i18n.register({
-      en: {
-        title: 'Nous Models',
-        loading: 'Loading…',
-        empty: 'No models available',
-        error: 'Could not load models — check your connection.',
-        retry: 'Retry',
-        refreshTip: 'Refresh prices',
-        chipTip: 'Nous models & pricing — click to view or switch'
-      }
-    })
-
     ctx.register({
-      id: 'chip',
-      area: STATUSBAR_AREAS.right,
-      order: 140,
-      render: () => jsx(ModelsChip, {})
+      id: 'nous-models-statusbar-chip',
+      area: ctx.ui.STATUSBAR_AREAS.right,
+      order: 100,
+      render: () => jsx(NousPopup, {}),
     })
-  }
+  },
 }
