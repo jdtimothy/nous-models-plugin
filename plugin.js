@@ -30,19 +30,21 @@ function buildModelBundle() {
   // These two public endpoints together give us everything we need:
   //   model-catalog.json -> curated Nous Portal model IDs + provider display info
   //   /v1/models -> current pricing, original pricing, context_length, :free variants
-  return { urls: { catalog: 'https://hermes-agent.nousresearch.com/docs/api/model-catalog.json', models: 'https://inference-api.nousresearch.com/v1/models' } }
+  return { urls: { catalog: 'https://nousresearch.github.io/hermes-agent/docs/api/model-catalog.json', models: 'https://inference-api.nousresearch.com/v1/models' } }
 }
 
 function processBundle(catalog, v1models) {
   const byId = new Map(v1models.data.map(m => [m.id, m]))
-  const catalogIds = new Set((catalog.models || []).map(m => m.id))
+  const nous = catalog?.providers?.nous?.models
+  const catalogRows = Array.isArray(nous) ? nous : []
 
   // derive tier from the :free counterpart
   const isFree = (id) => byId.has(id + ':free')
 
-  const rows = (catalog.models || [])
+  const rows = catalogRows
     .map(m => {
-      const v1 = byId.get(m.id)
+      const id = typeof m === 'string' ? m : m.id
+      const v1 = byId.get(id)
       if (!v1) return null
       const inp = v1.pricing?.prompt ?? null
       const out = v1.pricing?.completion ?? null
@@ -54,11 +56,11 @@ function processBundle(catalog, v1models) {
         if (disc > 99) disc = 99
       }
       return {
-        id: m.id,
-        name: m.name || m.id.split('/').pop(),
-        provider: m.provider || m.id.split('/')[0],
-        tier: isFree(m.id) ? 'free' : 'std',
-        badge: isFree(m.id) ? 'Free' : 'Std',
+        id,
+        name: id.split('/').pop(),
+        provider: id.split('/')[0],
+        tier: isFree(id) ? 'free' : 'std',
+        badge: isFree(id) ? 'Free' : 'Std',
         input: inp,
         output: out,
         discount: disc,
