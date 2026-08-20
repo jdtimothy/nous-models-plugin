@@ -41,8 +41,10 @@ cp plugin.js ~/.hermes/desktop-plugins/nous-models/plugin.js
 
 ## Install
 
+The plugin is already installed:
+
 ```bash
-cp plugin.js ~/.hermes/desktop-plugins/nous-models/plugin.js
+~/.hermes/desktop-plugins/nous-models/plugin.js
 ```
 
 The Hermes desktop app watches `~/.hermes/desktop-plugins/` and hot-reloads
@@ -58,3 +60,11 @@ python3 generate_plugin.py   # build plugin.js
 ```
 
 Requires Python 3.11+ (stdlib only, no pip deps).
+
+## Publish to GitHub
+
+```bash
+# From /home/joshua/dev/nous-models-plugin:
+git remote add origin <your-repo-url>
+git push -u origin master
+```
