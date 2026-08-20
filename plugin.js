@@ -9,11 +9,10 @@
  * Fetches live data from the Nous Portal directly.
  */
 
-const { useState, useEffect, useRef, useCallback, useMemo } = React
-const { Popover, PopoverContent, PopoverTrigger } = ctx.ui
-const host = ctx.host
-const jsx = React.jsx
-const { atom, computed } = ctx.ui
+import * as React from 'react'
+import { jsx } from 'react/jsx-runtime'
+import { host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, haptic, atom, computed, useValue } from '@hermes/plugin-sdk'
+const { useState, useEffect, useCallback, useMemo } = React
 
 // ---- Constants ----
 const PANEL_W = 680
@@ -119,8 +118,8 @@ async function setModel({ model, scope = 'session' }) {
 }
 
 // ---- Sound via haptic (same mechanism the app uses for native tap feedback) ----
-function haptic(name) {
-  try { host.haptic?.(name) } catch {}
+function tap() {
+  try { haptic('tap') } catch {}
 }
 
 // ---- Component: one model row ----
@@ -166,7 +165,7 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
     onMouseEnter: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'var(--chrome-action-hover, rgba(255,255,255,0.04))' },
     onMouseLeave: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'transparent' },
     onClick: async () => {
-      haptic('tap')
+      tap()
       try {
         await onSetSession(model.id)
       } catch (err) {
@@ -206,7 +205,7 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
             },
             onClick: async (e) => {
               e.stopPropagation()
-              haptic('tap')
+              tap()
               try {
                 await onSetDefault(model.id)
               } catch (err) {
@@ -226,8 +225,7 @@ function NousPopup() {
   const [bundle, setBundle] = useState(null)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
-  const currentModelAtom = useMemo(() => atom(String(host.state.model?.get?.() ?? host.state.model ?? '')), [])
-  const currentModel = currentModelAtom.get()
+  const currentModelRaw = useValue(host.state.model) ?? ''
 
   const load = useCallback(async () => {
     setError(null)
@@ -255,7 +253,7 @@ function NousPopup() {
 
   // Exact current-model match: strip any trailing flags off the stored value.
   function getCurrentModelSlug() {
-    const raw = String(currentModel || '').trim()
+    const raw = String(currentModelRaw || '').trim()
     const firstSpace = raw.search(/\s/)
     const base = firstSpace >= 0 ? raw.slice(0, firstSpace) : raw
     return base.toLowerCase()
@@ -306,7 +304,7 @@ function NousPopup() {
     jsx(PopoverTrigger, { asChild: true, children:
       jsx('button', {
         id: 'nous-models-chip',
-        onClick: () => haptic('tap'),
+        onClick: () => tap(),
         style: {
           appearance: 'none', border: 'none', background: 'transparent',
           color: 'var(--ui-text-secondary)', cursor: 'pointer',
@@ -376,7 +374,7 @@ export default {
   register(ctx) {
     ctx.register({
       id: 'nous-models-statusbar-chip',
-      area: ctx.ui.STATUSBAR_AREAS.right,
+      area: STATUSBAR_AREAS.right,
       order: 100,
       render: () => jsx(NousPopup, {}),
     })
