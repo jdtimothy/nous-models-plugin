@@ -44,25 +44,67 @@ function processBundle(catalog, v1models) {
   const rows = catalogRows
     .map(m => {
       const id = typeof m === 'string' ? m : m.id
+      const freeVar = id + ':free'
+      const freeEntry = byId.get(freeVar)
+      if (isFree(id)) {
+        // A :free variant exists: the selectable ID is actually the :free one,
+        // and the displayed pricing should come from that ($0) entry so the
+        // Free badge and the submitted model stay consistent.
+        const v1 = freeEntry
+        if (!v1) return null
+        const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
+        const inp = num(v1.pricing?.prompt)
+        const out = num(v1.pricing?.completion)
+        const origPrompt = num(v1.pricing?.original?.prompt)
+        const origCompletion = num(v1.pricing?.original?.completion)
+        let disc = null
+        if (origPrompt != null && origPrompt > 0) {
+          const base = byId.get(id)
+          const baseInp = num(base?.pricing?.prompt)
+          const baseOut = num(base?.pricing?.completion)
+          if (baseInp != null && baseOut != null && baseOut > 0) {
+            const avgOrig = (origPrompt + origCompletion) / 2
+            const avgCur = (baseInp + baseOut) / 2
+            disc = Math.round((1 - avgCur / avgOrig) * 100)
+          }
+        }
+        if (disc != null) { if (disc < 0) disc = 0; if (disc > 99) disc = 99 }
+        return {
+          id,
+          selectableId: freeVar,
+          name: id.split('/').pop(),
+          provider: id.split('/')[0],
+          tier: 'free',
+          badge: 'Free',
+          input: inp,
+          output: out,
+          discount: disc,
+          ctx: v1.context_length ?? null,
+        }
+      }
+
       const v1 = byId.get(id)
       if (!v1) return null
-      // pricing values arrive as strings ("0.0000002000"); coerce to numbers
       const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
       const inp = num(v1.pricing?.prompt)
       const out = num(v1.pricing?.completion)
       const origPrompt = num(v1.pricing?.original?.prompt)
+      const origCompletion = num(v1.pricing?.original?.completion)
       let disc = null
-      if (inp != null && origPrompt != null && origPrompt > 0) {
-        disc = Math.round((1 - inp / origPrompt) * 100)
+      if (inp != null && out != null && origPrompt != null && origCompletion != null && origPrompt > 0 && origCompletion > 0) {
+        const avgOrig = (origPrompt + origCompletion) / 2
+        const avgCur = (inp + out) / 2
+        disc = Math.round((1 - avgCur / avgOrig) * 100)
         if (disc < 0) disc = 0
         if (disc > 99) disc = 99
       }
       return {
         id,
+        selectableId: id,
         name: id.split('/').pop(),
         provider: id.split('/')[0],
-        tier: isFree(id) ? 'free' : 'std',
-        badge: isFree(id) ? 'Free' : 'Std',
+        tier: 'std',
+        badge: 'Std',
         input: inp,
         output: out,
         discount: disc,
@@ -172,9 +214,9 @@ function ModelRow({ model, onSetDefault, onSetSession }) {
     onClick: async () => {
       tap()
       try {
-        const res = await onSetSession(model.id)
+        const res = await onSetSession(model.selectableId)
         if (res?.deferred) {
-          host.notify({ kind: 'info', message: `Session model -> ${model.id} (applies next turn)` })
+          host.notify({ kind: 'info', message: `Session model -> ${model.selectableId} (applies next turn)` })
         }
       } catch (err) {
         host.notify({ kind: 'error', message: `Session model switch failed: ${err.message}` })
