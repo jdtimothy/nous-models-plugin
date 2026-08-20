@@ -5,6 +5,10 @@
  * lists every Nous Portal model with current + original pricing, the
  * discount %, context length, and free/paid-tier badges.
  *
+ * Each model row is CLICKABLE:
+ *   - primary click sets it as the current SESSION model
+ *   - a "default" button sets it as the profile default model
+ *
  * Data is LIVE — the plugin fetches the public Nous endpoints directly
  * from the browser every 10 minutes (both endpoints allow CORS). No
  * pricing is baked into this file, so the plugin never needs
@@ -17,6 +21,10 @@
  *
  * Free-tier detection: a catalog model is flagged Free when a matching
  * `:free` variant exists in /v1/models with $0 pricing.
+ *
+ * Model switching uses the gateway RPC that the app's own composer uses:
+ *   host.request('config.set', { session_id, key: 'model',
+ *     value: '<id> --provider <provider> [--global|--session]' })
  *
  * Self-contained: no Python backend, no config change, no gateway
  * restart — drop plugin.js into desktop-plugins/<id>/ and reload.
@@ -40,6 +48,7 @@ import {
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'nous-models'
+const PROVIDER = 'nous'
 
 const CATALOG_URL = 'https://hermes-agent.nousresearch.com/docs/api/model-catalog.json'
 const PRICING_URL = 'https://inference-api.nousresearch.com/v1/models'
@@ -80,7 +89,6 @@ function baseId(id) {
 }
 
 async function fetchModels() {
-  // Fetch both endpoints in parallel.
   const [catResp, priceResp] = await Promise.all([
     fetch(CATALOG_URL, { headers: { Accept: 'application/json' } }),
     fetch(PRICING_URL, { headers: { Accept: 'application/json' } })
@@ -93,7 +101,6 @@ async function fetchModels() {
   const catalogModels = catalog?.providers?.nous?.models ?? []
   const allModels = pricingData?.data ?? pricingData ?? []
 
-  // Index /v1/models by id, and collect :free variant ids.
   const byId = new Map()
   const freeVariantIds = new Set()
   for (const m of allModels) {
@@ -139,7 +146,6 @@ async function fetchModels() {
       }
     })
 
-  // Sort: free first, then by discount desc, then name.
   rows.sort((a, b) => {
     if (a.is_free !== b.is_free) return a.is_free ? -1 : 1
     const da = a.discount_avg_pct ?? -1
@@ -170,7 +176,23 @@ function useModels() {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Model switching — mirrors the app's composer (use-model-controls.ts)
+// ---------------------------------------------------------------------------
+
+async function setModel({ model, provider = PROVIDER, scope }) {
+  // scope: 'session' | 'global'  (global = profile default for new sessions)
+  const sessionId = host.state.activeSessionId.get()
+  const flag = scope === 'global' ? '--global' : '--session'
+  const params = {
+    key: 'model',
+    value: `${model} --provider ${provider} ${flag}`
+  }
+  if (scope === 'session' && sessionId) params.session_id = sessionId
+  return host.request('config.set', params)
+}
+
+// ---------------------------------------------------------------------------
+// UI helpers
 // ---------------------------------------------------------------------------
 
 function DiscountBadge({ pct }) {
@@ -199,20 +221,36 @@ function TierBadge({ isFree }) {
   })
 }
 
-function ModelRow({ model }) {
+// ---------------------------------------------------------------------------
+// Model row — clickable to switch model
+// ---------------------------------------------------------------------------
+
+function ModelRow({ model, isCurrent, onSwitch }) {
   return jsxs('div', {
     className: cn(
-      'flex items-center gap-2.5 px-1.5 py-1.5 rounded-md',
-      'hover:bg-(--chrome-action-hover) transition-colors'
+      'group flex items-center gap-2 px-1.5 py-1.5 rounded-md transition-colors',
+      'hover:bg-(--chrome-action-hover) cursor-pointer',
+      isCurrent && 'bg-(--ui-accent)/8'
     ),
     'data-testid': `model-${model.id}`,
+    onClick: () => onSwitch(model, 'session'),
+    title: `Set as current session model: ${model.id}`,
     children: [
       jsx(TierBadge, { isFree: model.is_free }),
       jsx('div', {
         className: 'min-w-0 flex-1',
-        children: jsx('div', {
-          className: 'text-[0.8125rem] font-medium truncate',
-          children: model.name
+        children: jsxs('div', {
+          className: 'flex items-center gap-1',
+          children: [
+            jsx('span', {
+              className: cn('truncate text-[0.8125rem] font-medium', isCurrent && 'text-(--ui-accent)'),
+              children: model.name
+            }),
+            isCurrent ? jsx('span', {
+              className: 'shrink-0 text-[0.6rem] uppercase tracking-wide text-(--ui-accent)',
+              children: 'now'
+            }) : null
+          ]
         })
       }),
       jsx('div', {
@@ -223,6 +261,18 @@ function ModelRow({ model }) {
       jsx('div', {
         className: 'w-[42px] text-right',
         children: jsx(DiscountBadge, { pct: model.discount_avg_pct })
+      }),
+      // Hover actions: set as default
+      jsx('button', {
+        type: 'button',
+        onClick: (e) => { e.stopPropagation(); onSwitch(model, 'global') },
+        title: 'Set as default model (new sessions)',
+        className: cn(
+          'shrink-0 rounded px-1.5 py-0.5 text-[0.6rem] font-medium opacity-0 transition-opacity',
+          'group-hover:opacity-100 hover:bg-(--chrome-action-hover) hover:text-foreground',
+          'text-(--ui-text-tertiary)'
+        ),
+        children: 'default'
       })
     ]
   })
@@ -232,19 +282,40 @@ function ModelRow({ model }) {
 // Popup panel content
 // ---------------------------------------------------------------------------
 
-function ModelsPanel() {
+function ModelsPanel({ setStatus }) {
   const t = usePluginI18n(ID)
   const { data, isLoading, isError, refetch, isFetching } = useModels()
+
+  // Current model from host state (reactive).
+  const currentModel = useValue(host.state.model)
 
   const models = data?.models ?? []
   const stats = data?.stats ?? null
 
-  const header = stats
-    ? `${stats.total} models · ${stats.free} free`
-    : ''
+  const header = stats ? `${stats.total} models · ${stats.free} free` : ''
+
+  const onSwitch = async (model, scope) => {
+    haptic('tap')
+    try {
+      await setModel({ model: model.id, scope })
+      const label = scope === 'global' ? 'Default model' : 'Session model'
+      host.notify({
+        kind: 'success',
+        message: `${label} → ${model.name}`
+      })
+    } catch (err) {
+      host.notify({
+        kind: 'error',
+        message: `Could not switch to ${model.name} (${scope})`
+      })
+    }
+  }
+
+  // A model is "current" if its short name appears in the active model slug.
+  const currentSlug = String(currentModel || '').toLowerCase()
 
   return jsxs('div', {
-    className: 'flex w-[380px] flex-col gap-1',
+    className: 'flex w-[400px] flex-col gap-1',
     children: [
       // Header row: title + stats + refresh button
       jsxs('div', {
@@ -278,23 +349,24 @@ function ModelsPanel() {
 
       // Column headers
       jsxs('div', {
-        className: 'flex items-center gap-2.5 px-1.5 pb-0.5 text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        className: 'flex items-center gap-2 px-1.5 pb-0.5 text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
         children: [
           jsx('div', { className: 'w-[52px]' }),
           jsx('div', { className: 'min-w-0 flex-1' }),
           jsx('div', { className: 'w-[52px] text-right', children: 'In/Out' }),
-          jsx('div', { className: 'w-[42px] text-right', children: 'Disc' })
+          jsx('div', { className: 'w-[42px] text-right', children: 'Disc' }),
+          jsx('div', { className: 'w-[52px]' })
         ]
       }),
 
-      // Body
+      // Body — fixed height so ScrollArea scrolls internally
       jsx('div', {
-        className: 'max-h-[320px]',
+        className: 'h-[320px]',
         children: isLoading
-          ? jsx('div', { className: 'flex h-24 items-center justify-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('loading') })
+          ? jsx('div', { className: 'flex h-full items-center justify-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('loading') })
           : isError
             ? jsx('div', {
-                className: 'flex flex-col items-center gap-1 p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)',
+                className: 'flex flex-col items-center justify-center gap-1 p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)',
                 children: [
                   jsx('div', { children: t('error') }),
                   jsx('button', {
@@ -314,19 +386,28 @@ function ModelsPanel() {
                   ? jsx('div', { className: 'p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('empty') })
                   : jsxs('div', {
                       className: 'flex flex-col',
-                      children: models.map(m => jsx(ModelRow, { key: m.id, model: m }))
+                      children: models.map(m =>
+                        jsx(ModelRow, {
+                          key: m.id,
+                          model: m,
+                          isCurrent: currentSlug.includes(baseId(m.id).split('/')[1]) || currentSlug.includes(m.name),
+                          onSwitch
+                        })
+                      )
                     })
               })
       }),
 
       // Footer
-      stats ? jsxs('div', {
+      jsxs('div', {
         className: 'flex items-center justify-between border-t border-(--ui-stroke-secondary) px-1 pt-1 text-[0.6rem] text-(--ui-text-tertiary)',
         children: [
-          jsx('span', { children: stats.avg_discount_pct != null ? `Avg discount ${Math.round(stats.avg_discount_pct)}%` : '' }),
-          jsx('span', { children: t('live') })
+          jsx('span', {
+            children: stats && stats.avg_discount_pct != null ? `Avg discount ${Math.round(stats.avg_discount_pct)}%` : ''
+          }),
+          jsx('span', { children: 'click model → session · hover "default" → new sessions' })
         ]
-      }) : null
+      })
     ]
   })
 }
@@ -385,12 +466,10 @@ export default {
         error: 'Could not load models — check your connection.',
         retry: 'Retry',
         refreshTip: 'Refresh prices',
-        live: 'Live · updates every 10 min',
-        chipTip: 'Nous models & pricing — click to view'
+        chipTip: 'Nous models & pricing — click to view or switch'
       }
     })
 
-    // Statusbar chip with a click-to-open popup. No sidebar pane.
     ctx.register({
       id: 'chip',
       area: STATUSBAR_AREAS.right,

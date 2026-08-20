@@ -17,12 +17,25 @@ Clicking the statusbar chip opens a popup with each model's:
 | Column | Meaning |
 |--------|---------|
 | Tier badge | `Free` (green) or `Std` |
-| Name | Model name (e.g. `gpt-5.6-terra`) |
+| Name | Model name (e.g. `gpt-5.6-terra`), with a `now` tag on the active model |
 | In/Out | Current price per 1M input/output tokens (USD) |
 | Disc | Average input+output discount % vs original price |
 
 A header shows total / free counts, and a footer shows the average discount
-across all models and that the data is live.
+across all models.
+
+## Switching models
+
+Each model row is clickable:
+
+- **Click a row** → sets it as the **current session model** (applies to the
+  active chat; a mid-turn switch is deferred by the gateway and lands at the
+  next turn).
+- **Hover a row → click `default`** → sets it as the **profile default model**
+  (applies to new sessions).
+
+Both use the same `config.set` gateway RPC the app's own model picker uses, so
+the switch behaves exactly like selecting from the built-in model menu.
 
 ## Data sources (public, CORS-enabled — fetched by the plugin directly)
 
