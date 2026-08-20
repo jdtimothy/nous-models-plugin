@@ -4,13 +4,13 @@ A Hermes desktop plugin that shows the Nous Portal model catalog with **live**
 pricing, original pricing, current discount percentages, context lengths, and
 free-tier badges — right in the desktop app's status bar.
 
+![Nous Models & Pricing popup](docs/screenshot.png)
+
 - **Statusbar chip** — a catalog icon + "Nous". Click it → a popup panel
   lists every Nous Portal model.
 - **Live data** — the plugin fetches the public Nous endpoints directly from
   the browser every 10 minutes. Nothing is baked in, so it always shows the
   current prices without ever regenerating or reinstalling the plugin.
-
-![Nous Models & Pricing popup](docs/screenshot.png)
 
 ## What it shows
 
@@ -78,3 +78,9 @@ is loaded uncompiled.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Disclaimer
+
+The model prices shown by this plugin are provided for **reference only** and are fetched live from public Nous Portal endpoints. While the plugin aims to always reflect current prices, prices, discounts, and model availability can change at any time, and the plugin may occasionally display stale or incorrect data.
+
+By installing and using this plugin, you agree that the pricing information is presented **as-is**, without warranty of accuracy or completeness, and that the author is **not responsible** for any unexpected costs incurred from model usage based on the pricing shown.
