@@ -3,7 +3,7 @@
  *
  * Statusbar chip shows a live model count. Click it -> a popup panel
  * lists every Nous Portal model with current + original pricing, the
- * discount percent, and a "now" tag for the active model.
+ * discount percent, and a "now" tag for the live session model.
  *
  * No sidebar pane. No build step. No Python backend.
  * Fetches live data from the Nous Portal directly.
@@ -86,13 +86,45 @@ function processBundle(catalog, v1models) {
   return { models: rows, freeCount, total: rows.length, avgDiscount: avgDisc, fetchedAt: Date.now() }
 }
 
-// ---- Focused session id from the desktop SDK ----
-function getFocusedSessionId() {
-  try {
-    const raw = host.state.activeSessionId?.get?.() ?? host.state.activeSessionId ?? null
-    if (raw) return String(raw).trim()
-  } catch {}
+// ---- Live session model tracker ----
+// host.state.model is the composer's sticky UI state, NOT the live agent
+// model. The authoritative source is the gateway's session.info event, which
+// carries the real model/provider the agent runs on. We subscribe once and
+// keep { runtimeId -> { model, provider } }.
+const liveModels = atom({})
+
+// Track the focused/active runtime id reactively from host.state.
+function getRuntimeId() {
+  try { return host.state.focusedSessionId?.get?.() ?? host.state.focusedSessionId ?? null } catch {}
+  try { return host.state.activeSessionId?.get?.() ?? host.state.activeSessionId ?? null } catch {}
   return null
+}
+
+function normalizeModel(value) {
+  if (value == null) return ''
+  const raw = String(value).trim()
+  // Strip any trailing flags like "--provider nous --session"
+  const i = raw.search(/\s/)
+  return (i >= 0 ? raw.slice(0, i) : raw).toLowerCase()
+}
+
+// ---- Switch model via gateway RPC (same path the app's own picker uses) ----
+async function setModel({ model, scope = 'session' }) {
+  const provider = 'nous'
+  const sid = getRuntimeId()
+  const rawValue = scope === 'global'
+    ? `${model} --provider ${provider} --global`
+    : `${model} --provider ${provider} --session`
+  const params = { key: 'model', value: rawValue }
+  if (sid) params.session_id = sid
+  const res = await host.request('config.set', params)
+  // config.set returns { value, deferred?, scope? } on success
+  return res
+}
+
+// ---- Sound via haptic (same mechanism the app uses for native tap feedback) ----
+function tap() {
+  try { haptic('tap') } catch {}
 }
 
 // ---- Format a compact price string ----
@@ -102,28 +134,6 @@ function fmtPrice(p) {
   if (p < 0.0001) return `$${(p * 1e6).toFixed(2)}/1M`
   if (p < 0.01) return `$${(p * 1e3).toFixed(2)}/K`
   return `$${p.toFixed(p < 1 ? 4 : 2)}`
-}
-
-// ---- Switch model via gateway RPC (same path the app's own picker uses) ----
-async function setModel({ model, scope = 'session' }) {
-  const provider = 'nous'
-  const sid = getFocusedSessionId()
-  if (!sid) throw new Error('no focused session — open a chat and try again')
-  const rawValue = scope === 'global'
-    ? `${model} --provider ${provider} --global`
-    : `${model} --provider ${provider} --session`
-  const res = await host.request('config.set', {
-    session_id: sid,
-    key: 'model',
-    value: rawValue,
-  })
-  // config.set returns { value, deferred? } on success
-  return res
-}
-
-// ---- Sound via haptic (same mechanism the app uses for native tap feedback) ----
-function tap() {
-  try { haptic('tap') } catch {}
 }
 
 // ---- Component: one model row ----
@@ -171,7 +181,10 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
     onClick: async () => {
       tap()
       try {
-        await onSetSession(model.id)
+        const res = await onSetSession(model.id)
+        if (res?.deferred) {
+          host.notify({ kind: 'info', message: `Session model -> ${model.id} (applies next turn)` })
+        }
       } catch (err) {
         host.notify({ kind: 'error', message: `Session model switch failed: ${err.message}` })
       }
@@ -211,7 +224,10 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
               e.stopPropagation()
               tap()
               try {
-                await onSetDefault(model.id)
+                const res = await onSetDefault(model.id)
+                if (res?.deferred) {
+                  host.notify({ kind: 'info', message: `Default model -> ${model.id} (applies to new sessions)` })
+                }
               } catch (err) {
                 host.notify({ kind: 'error', message: `Default model switch failed: ${err.message}` })
               }
@@ -229,7 +245,20 @@ function NousPopup() {
   const [bundle, setBundle] = useState(null)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
-  const currentModelRaw = useValue(host.state.model) ?? ''
+  const [nowModel, setNowModel] = useState(null)
+
+  // Subscribe once to the live session.info events to track the real model.
+  useEffect(() => {
+    const dispose = host.onEvent('session.info', (evt) => {
+      const sid = evt?.session_id ?? evt?.data?.session_id ?? getRuntimeId()
+      const info = evt?.data?.info ?? evt?.info ?? evt?.data ?? {}
+      const model = info?.model
+      if (model) {
+        liveModels.set({ ...liveModels.get(), [sid]: { model, provider: info.provider } })
+      }
+    })
+    return () => { try { dispose?.() } catch {} }
+  }, [])
 
   const load = useCallback(async () => {
     setError(null)
@@ -239,8 +268,7 @@ function NousPopup() {
         fetchJSON(spec.urls.catalog),
         fetchJSON(spec.urls.models),
       ])
-      const processed = processBundle(catalog, v1)
-      setBundle(processed)
+      setBundle(processBundle(catalog, v1))
     } catch (err) {
       setError(err.message)
     }
@@ -255,27 +283,18 @@ function NousPopup() {
     return () => clearInterval(id)
   }, [open, load])
 
-  // Exact current-model match: strip any trailing flags off the stored value.
-  function getCurrentModelSlug() {
-    const raw = String(currentModelRaw || '').trim()
-    const firstSpace = raw.search(/\s/)
-    const base = firstSpace >= 0 ? raw.slice(0, firstSpace) : raw
-    return base.toLowerCase()
-  }
-  const currentSlug = getCurrentModelSlug()
+  // The LIVE current model for the focused session (from session.info).
+  const focusedId = useValue(host.state.focusedSessionId) ?? useValue(host.state.activeSessionId) ?? null
+  const liveState = useValue(liveModels)
+  const liveForSession = focusedId ? liveState[focusedId] : null
+  const currentSlug = normalizeModel(liveForSession?.model) || normalizeModel(useValue(host.state.model))
 
   // Actions
   const onSetDefault = useCallback(async (modelId) => {
-    const res = await setModel({ model: modelId, scope: 'global' })
-    if (res?.deferred) {
-      host.notify({ kind: 'info', message: `Default model -> ${modelId} (applies to new sessions)` })
-    }
+    return await setModel({ model: modelId, scope: 'global' })
   }, [])
   const onSetSession = useCallback(async (modelId) => {
-    const res = await setModel({ model: modelId, scope: 'session' })
-    if (res?.deferred) {
-      host.notify({ kind: 'info', message: `Session model -> ${modelId} (applies next turn)` })
-    }
+    return await setModel({ model: modelId, scope: 'session' })
   }, [])
 
   const contentStyle = {
