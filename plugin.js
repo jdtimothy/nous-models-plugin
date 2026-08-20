@@ -46,12 +46,14 @@ function processBundle(catalog, v1models) {
       const id = typeof m === 'string' ? m : m.id
       const v1 = byId.get(id)
       if (!v1) return null
-      const inp = v1.pricing?.prompt ?? null
-      const out = v1.pricing?.completion ?? null
-      const orig = v1.original_pricing ?? null
+      // pricing values arrive as strings ("0.0000002000"); coerce to numbers
+      const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
+      const inp = num(v1.pricing?.prompt)
+      const out = num(v1.pricing?.completion)
+      const origPrompt = num(v1.pricing?.original?.prompt)
       let disc = null
-      if (inp != null && orig?.prompt != null && orig.prompt > 0) {
-        disc = Math.round((1 - inp / orig.prompt) * 100)
+      if (inp != null && origPrompt != null && origPrompt > 0) {
+        disc = Math.round((1 - inp / origPrompt) * 100)
         if (disc < 0) disc = 0
         if (disc > 99) disc = 99
       }
@@ -184,11 +186,11 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
       }),
       jsx('span', {
         style: { fontSize: '11px', color: 'var(--muted-foreground)', width: '64px', textAlign: 'right', flexShrink: 0 },
-        children: model.input == null ? '—' : `$${model.input.toFixed(2)}`
+        children: fmtPrice(model.input)
       }),
       jsx('span', {
         style: { fontSize: '11px', color: 'var(--muted-foreground)', width: '64px', textAlign: 'right', flexShrink: 0 },
-        children: model.output == null ? '—' : `$${model.output.toFixed(2)}`
+        children: fmtPrice(model.output)
       }),
       jsx('span', {
         style: { fontSize: '11px', width: '46px', textAlign: 'right', fontWeight: 600, color: model.discount ? 'var(--accent)' : 'var(--muted-foreground)', flexShrink: 0 },
