@@ -9,25 +9,21 @@
  *   - primary click sets it as the current SESSION model
  *   - a "default" button sets it as the profile default model
  *
- * Data is LIVE — the plugin fetches the public Nous endpoints directly
- * from the browser every 10 minutes (both endpoints allow CORS). No
- * pricing is baked into this file, so the plugin never needs
- * regenerating to show new prices:
+ * Data is LIVE — fetched from the public Nous endpoints directly from
+ * the browser every 10 minutes (both allow CORS). No pricing is baked
+ * into this file.
  *
- *   - https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
- *       (redirects to nousresearch.github.io — CORS-enabled) → model list
- *   - https://inference-api.nousresearch.com/v1/models  (CORS-enabled)
- *       → current + original pricing, context length, :free variants
+ * IMPORTANT (Tailwind): plugin files load at RUNTIME, after the app's
+ * Tailwind build-time scan, so arbitrary-value utility classes that
+ * appear ONLY here (h-[320px], w-[52px], text-[0.8125rem], …) are NOT
+ * compiled into the app CSS. Use inline `style={{}}` for every custom
+ * dimension/size; reserve utility classes for standard ones (flex,
+ * items-center, gap-2, rounded-md, truncate, …).
  *
- * Free-tier detection: a catalog model is flagged Free when a matching
- * `:free` variant exists in /v1/models with $0 pricing.
- *
- * Model switching uses the gateway RPC that the app's own composer uses:
+ * Model switching uses the same `config.set` gateway RPC as the app's
+ * own model picker:
  *   host.request('config.set', { session_id, key: 'model',
  *     value: '<id> --provider <provider> [--global|--session]' })
- *
- * Self-contained: no Python backend, no config change, no gateway
- * restart — drop plugin.js into desktop-plugins/<id>/ and reload.
  *
  * Plain ESM loaded uncompiled: UI is jsx() calls, NOT JSX syntax; only
  * @hermes/plugin-sdk, react, react/jsx-runtime resolve.
@@ -39,7 +35,6 @@ import {
   Popover,
   PopoverContent,
   PopoverTrigger,
-  ScrollArea,
   STATUSBAR_AREAS,
   usePluginI18n,
   useQuery,
@@ -72,13 +67,6 @@ function calcDiscount(cur, orig) {
   const c = Number(cur), o = Number(orig)
   if (!isFinite(c) || !isFinite(o) || o === 0) return null
   return Math.round((1 - c / o) * 100 * 10) / 10
-}
-
-function contextStr(n) {
-  if (typeof n !== 'number') return '—'
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
-  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
-  return String(n)
 }
 
 function baseId(id) {
@@ -118,13 +106,8 @@ async function fetchModels() {
       const pricing = (pm && pm.pricing) || {}
       const original = (pricing && pricing.original) || {}
 
-      const promptCur = pricing.prompt
-      const compCur = pricing.completion
-      const promptOrig = original.prompt
-      const compOrig = original.completion
-
-      const dIn = calcDiscount(promptCur, promptOrig)
-      const dOut = calcDiscount(compCur, compOrig)
+      const dIn = calcDiscount(pricing.prompt, original.prompt)
+      const dOut = calcDiscount(pricing.completion, original.completion)
       let avg = null
       if (dIn != null && dOut != null) avg = Math.round(((dIn + dOut) / 2) * 10) / 10
       else if (dIn != null) avg = dIn
@@ -136,12 +119,11 @@ async function fetchModels() {
       return {
         id: mid,
         name,
-        input_per_1m: formatPrice(promptCur),
-        output_per_1m: formatPrice(compCur),
-        input_original_per_1m: formatPrice(promptOrig),
-        output_original_per_1m: formatPrice(compOrig),
+        input_per_1m: formatPrice(pricing.prompt),
+        output_per_1m: formatPrice(pricing.completion),
+        input_original_per_1m: formatPrice(original.prompt),
+        output_original_per_1m: formatPrice(original.completion),
         discount_avg_pct: avg,
-        context_length: contextStr(pm.context_length),
         is_free: freeVariantIds.has(mid)
       }
     })
@@ -180,14 +162,17 @@ function useModels() {
 // ---------------------------------------------------------------------------
 
 async function setModel({ model, provider = PROVIDER, scope }) {
-  // scope: 'session' | 'global'  (global = profile default for new sessions)
-  const sessionId = host.state.activeSessionId.get()
+  // scope: 'session' | 'global'
+  const sessionId = host.state.focusedSessionId.get() || host.state.activeSessionId.get()
   const flag = scope === 'global' ? '--global' : '--session'
   const params = {
     key: 'model',
     value: `${model} --provider ${provider} ${flag}`
   }
-  if (scope === 'session' && sessionId) params.session_id = sessionId
+  // Always pass the session id when we have one; the gateway applies a
+  // session-scoped switch to that live session (deferring a mid-turn swap
+  // to the next turn). `--global` persists to config.yaml regardless.
+  if (sessionId) params.session_id = sessionId
   return host.request('config.set', params)
 }
 
@@ -195,28 +180,44 @@ async function setModel({ model, provider = PROVIDER, scope }) {
 // UI helpers
 // ---------------------------------------------------------------------------
 
+const ROW_H = 28            // px, per row
+const TIER_W = 52           // px
+const PRICE_W = 52          // px
+const DISC_W = 42           // px
+const ACTION_W = 56         // px (hover "default" button)
+const PANEL_W = 400         // px
+
 function DiscountBadge({ pct }) {
   if (pct == null) return jsx('span', { children: '—' })
   const color = pct >= 50 ? 'var(--ui-accent)'
     : pct >= 20 ? 'var(--ui-text-secondary)'
     : 'var(--ui-text-tertiary)'
   return jsx('span', {
-    className: 'font-mono text-xs',
-    style: { color },
+    style: { color, fontFamily: 'var(--font-mono)', fontSize: '12px' },
     children: `${Math.round(pct)}%`
   })
 }
 
 function TierBadge({ isFree }) {
   if (isFree) return jsx('span', {
-    className: cn(
-      'inline-flex h-5 min-w-[28px] items-center justify-center rounded-full border px-1',
-      'text-[0.65rem] font-medium text-white bg-emerald-500/90 border-emerald-400/40'
-    ),
+    style: {
+      display: 'inline-flex',
+      height: '20px',
+      minWidth: '28px',
+      alignItems: 'center',
+      justifyContent: 'center',
+      borderRadius: '9999px',
+      border: '1px solid rgba(52,211,153,0.4)',
+      padding: '0 4px',
+      fontSize: '10px',
+      fontWeight: 500,
+      color: '#fff',
+      background: 'rgba(16,185,129,0.9)'
+    },
     children: 'Free'
   })
   return jsx('span', {
-    className: 'text-(--ui-text-tertiary) text-[0.65rem]',
+    style: { fontSize: '10px', color: 'var(--ui-text-tertiary)' },
     children: 'Std'
   })
 }
@@ -227,51 +228,85 @@ function TierBadge({ isFree }) {
 
 function ModelRow({ model, isCurrent, onSwitch }) {
   return jsxs('div', {
+    role: 'button',
+    tabIndex: 0,
+    style: {
+      display: 'flex',
+      alignItems: 'center',
+      gap: '8px',
+      padding: '5px 6px',
+      borderRadius: '6px',
+      cursor: 'pointer',
+      height: `${ROW_H}px`,
+      boxSizing: 'border-box'
+    },
     className: cn(
-      'group flex items-center gap-2 px-1.5 py-1.5 rounded-md transition-colors',
-      'hover:bg-(--chrome-action-hover) cursor-pointer',
+      'group transition-colors',
+      'hover:bg-(--chrome-action-hover)',
       isCurrent && 'bg-(--ui-accent)/8'
     ),
     'data-testid': `model-${model.id}`,
     onClick: () => onSwitch(model, 'session'),
+    onKeyDown: (e) => { if (e.key === 'Enter' || e.key === ' ') onSwitch(model, 'session') },
     title: `Set as current session model: ${model.id}`,
     children: [
       jsx(TierBadge, { isFree: model.is_free }),
+
+      // Name
       jsx('div', {
-        className: 'min-w-0 flex-1',
+        style: { flex: '1 1 0%', minWidth: '0' },
         children: jsxs('div', {
-          className: 'flex items-center gap-1',
+          style: { display: 'flex', alignItems: 'center', gap: '4px' },
           children: [
             jsx('span', {
-              className: cn('truncate text-[0.8125rem] font-medium', isCurrent && 'text-(--ui-accent)'),
+              style: {
+                fontSize: '13px',
+                fontWeight: 500,
+                overflow: 'hidden',
+                textOverflow: 'ellipsis',
+                whiteSpace: 'nowrap',
+                color: isCurrent ? 'var(--ui-accent)' : undefined
+              },
               children: model.name
             }),
             isCurrent ? jsx('span', {
-              className: 'shrink-0 text-[0.6rem] uppercase tracking-wide text-(--ui-accent)',
+              style: { fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ui-accent)', flexShrink: 0 },
               children: 'now'
             }) : null
           ]
         })
       }),
+
+      // In/Out price
       jsx('div', {
-        className: 'w-[52px] text-right text-[0.75rem] tabular-nums text-(--ui-text-secondary)',
+        style: { width: `${PRICE_W}px`, textAlign: 'right', fontSize: '12px', fontVariantNumeric: 'tabular-nums', color: 'var(--ui-text-secondary)' },
         title: `in ${model.input_per_1m} / out ${model.output_per_1m}`,
         children: `${model.input_per_1m}/${model.output_per_1m}`
       }),
+
+      // Discount
       jsx('div', {
-        className: 'w-[42px] text-right',
+        style: { width: `${DISC_W}px`, textAlign: 'right' },
         children: jsx(DiscountBadge, { pct: model.discount_avg_pct })
       }),
-      // Hover actions: set as default
+
+      // Hover "default" action
       jsx('button', {
         type: 'button',
         onClick: (e) => { e.stopPropagation(); onSwitch(model, 'global') },
         title: 'Set as default model (new sessions)',
-        className: cn(
-          'shrink-0 rounded px-1.5 py-0.5 text-[0.6rem] font-medium opacity-0 transition-opacity',
-          'group-hover:opacity-100 hover:bg-(--chrome-action-hover) hover:text-foreground',
-          'text-(--ui-text-tertiary)'
-        ),
+        style: {
+          width: `${ACTION_W}px`,
+          flexShrink: 0,
+          borderRadius: '4px',
+          padding: '2px 4px',
+          fontSize: '10px',
+          fontWeight: 500,
+          color: 'var(--ui-text-tertiary)',
+          opacity: 0,
+          transition: 'opacity 100ms'
+        },
+        className: 'group-hover:opacity-100 hover:bg-(--chrome-action-hover) hover:text-foreground',
         children: 'default'
       })
     ]
@@ -282,11 +317,10 @@ function ModelRow({ model, isCurrent, onSwitch }) {
 // Popup panel content
 // ---------------------------------------------------------------------------
 
-function ModelsPanel({ setStatus }) {
+function ModelsPanel() {
   const t = usePluginI18n(ID)
   const { data, isLoading, isError, refetch, isFetching } = useModels()
 
-  // Current model from host state (reactive).
   const currentModel = useValue(host.state.model)
 
   const models = data?.models ?? []
@@ -297,36 +331,31 @@ function ModelsPanel({ setStatus }) {
   const onSwitch = async (model, scope) => {
     haptic('tap')
     try {
-      await setModel({ model: model.id, scope })
+      const res = await setModel({ model: model.id, scope })
       const label = scope === 'global' ? 'Default model' : 'Session model'
-      host.notify({
-        kind: 'success',
-        message: `${label} → ${model.name}`
-      })
+      // A mid-turn session switch is deferred to the next turn — say so.
+      const suffix = res && res.deferred ? ' (applies next turn)' : ''
+      host.notify({ kind: 'success', message: `${label} → ${model.name}${suffix}` })
     } catch (err) {
-      host.notify({
-        kind: 'error',
-        message: `Could not switch to ${model.name} (${scope})`
-      })
+      host.notify({ kind: 'error', message: `Could not switch to ${model.name} (${scope}): ${err?.message || err}` })
     }
   }
 
-  // A model is "current" if its short name appears in the active model slug.
   const currentSlug = String(currentModel || '').toLowerCase()
 
   return jsxs('div', {
-    className: 'flex w-[400px] flex-col gap-1',
+    style: { display: 'flex', flexDirection: 'column', gap: '4px', width: `${PANEL_W}px` },
     children: [
-      // Header row: title + stats + refresh button
+      // Header
       jsxs('div', {
-        className: 'flex items-center justify-between gap-2 px-1 pt-1',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px', padding: '2px 2px 0' },
         children: [
           jsxs('div', {
-            className: 'min-w-0',
+            style: { minWidth: '0' },
             children: [
-              jsx('div', { className: 'text-sm font-semibold', children: t('title') }),
+              jsx('div', { style: { fontSize: '14px', fontWeight: 600 }, children: t('title') }),
               jsx('div', {
-                className: 'truncate text-[0.65rem] text-(--ui-text-tertiary)',
+                style: { fontSize: '10px', color: 'var(--ui-text-tertiary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
                 children: stats ? header : t('loading')
               })
             ]
@@ -336,12 +365,12 @@ function ModelsPanel({ setStatus }) {
             onClick: () => { haptic('tap'); refetch() },
             disabled: isFetching,
             title: t('refreshTip'),
-            className: cn(
-              'flex h-6 w-6 shrink-0 items-center justify-center rounded-md',
-              'text-(--ui-text-secondary) transition-colors',
-              'hover:bg-(--chrome-action-hover) hover:text-foreground',
-              'disabled:opacity-50'
-            ),
+            style: {
+              display: 'flex', height: '24px', width: '24px', flexShrink: 0,
+              alignItems: 'center', justifyContent: 'center', borderRadius: '6px',
+              color: 'var(--ui-text-secondary)', opacity: isFetching ? 0.5 : 1
+            },
+            className: 'hover:bg-(--chrome-action-hover) hover:text-foreground',
             children: isFetching ? '…' : '↻'
           })
         ]
@@ -349,58 +378,54 @@ function ModelsPanel({ setStatus }) {
 
       // Column headers
       jsxs('div', {
-        className: 'flex items-center gap-2 px-1.5 pb-0.5 text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
+        style: { display: 'flex', alignItems: 'center', gap: '8px', padding: '0 6px', fontSize: '9px', textTransform: 'uppercase', letterSpacing: '0.05em', color: 'var(--ui-text-tertiary)' },
         children: [
-          jsx('div', { className: 'w-[52px]' }),
-          jsx('div', { className: 'min-w-0 flex-1' }),
-          jsx('div', { className: 'w-[52px] text-right', children: 'In/Out' }),
-          jsx('div', { className: 'w-[42px] text-right', children: 'Disc' }),
-          jsx('div', { className: 'w-[52px]' })
+          jsx('div', { style: { width: `${TIER_W}px` } }),
+          jsx('div', { style: { flex: '1 1 0%', minWidth: '0' } }),
+          jsx('div', { style: { width: `${PRICE_W}px`, textAlign: 'right' }, children: 'In/Out' }),
+          jsx('div', { style: { width: `${DISC_W}px`, textAlign: 'right' }, children: 'Disc' }),
+          jsx('div', { style: { width: `${ACTION_W}px` } })
         ]
       }),
 
-      // Body — fixed height so ScrollArea scrolls internally
+      // Body — fixed height + overflow-y:auto (inline style, not a Tailwind
+      // arbitrary class, so the scroll actually works in the shipped CSS).
       jsx('div', {
-        className: 'h-[320px]',
+        style: { height: '300px', overflowY: 'auto' },
         children: isLoading
-          ? jsx('div', { className: 'flex h-full items-center justify-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('loading') })
+          ? jsx('div', { style: { display: 'flex', height: '100%', alignItems: 'center', justifyContent: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' }, children: t('loading') })
           : isError
             ? jsx('div', {
-                className: 'flex flex-col items-center justify-center gap-1 p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)',
+                style: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '4px', padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' },
                 children: [
                   jsx('div', { children: t('error') }),
                   jsx('button', {
                     type: 'button',
                     onClick: () => refetch(),
-                    className: cn(
-                      'rounded-md border border-(--ui-stroke-secondary) px-2 py-0.5 text-[0.7rem]',
-                      'hover:bg-(--chrome-action-hover)'
-                    ),
+                    style: { borderRadius: '6px', border: '1px solid var(--ui-stroke-secondary)', padding: '2px 8px', fontSize: '11px' },
+                    className: 'hover:bg-(--chrome-action-hover)',
                     children: t('retry')
                   })
                 ]
               })
-            : jsx(ScrollArea, {
-                className: 'h-full',
-                children: models.length === 0
-                  ? jsx('div', { className: 'p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('empty') })
-                  : jsxs('div', {
-                      className: 'flex flex-col',
-                      children: models.map(m =>
-                        jsx(ModelRow, {
-                          key: m.id,
-                          model: m,
-                          isCurrent: currentSlug.includes(baseId(m.id).split('/')[1]) || currentSlug.includes(m.name),
-                          onSwitch
-                        })
-                      )
+            : models.length === 0
+              ? jsx('div', { style: { padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' }, children: t('empty') })
+              : jsxs('div', {
+                  style: { display: 'flex', flexDirection: 'column' },
+                  children: models.map(m =>
+                    jsx(ModelRow, {
+                      key: m.id,
+                      model: m,
+                      isCurrent: currentSlug.includes(baseId(m.id).split('/')[1]) || currentSlug.includes(m.name),
+                      onSwitch
                     })
-              })
+                  )
+                })
       }),
 
       // Footer
       jsxs('div', {
-        className: 'flex items-center justify-between border-t border-(--ui-stroke-secondary) px-1 pt-1 text-[0.6rem] text-(--ui-text-tertiary)',
+        style: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', borderTop: '1px solid var(--ui-stroke-secondary)', padding: '4px 2px 0', fontSize: '9px', color: 'var(--ui-text-tertiary)' },
         children: [
           jsx('span', {
             children: stats && stats.avg_discount_pct != null ? `Avg discount ${Math.round(stats.avg_discount_pct)}%` : ''
@@ -429,12 +454,10 @@ function ModelsChip() {
         children: jsx('button', {
           type: 'button',
           title: t('chipTip'),
-          className: cn(
-            'flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
-            'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground'
-          ),
+          style: { display: 'flex', height: '100%', alignItems: 'center', gap: '4px', padding: '0 6px', fontSize: '11px', color: 'var(--ui-text-secondary)' },
+          className: 'transition-colors hover:bg-(--chrome-action-hover) hover:text-foreground',
           children: [
-            jsx('span', { className: 'text-(--ui-accent)', children: '◈' }),
+            jsx('span', { style: { color: 'var(--ui-accent)' }, children: '◈' }),
             jsx('span', { children: chipLabel })
           ]
         })
@@ -443,7 +466,7 @@ function ModelsChip() {
         align: 'end',
         side: 'top',
         sideOffset: 6,
-        className: 'w-auto p-2',
+        style: { width: 'auto', padding: '8px' },
         children: jsx(ModelsPanel, {})
       })
     ]
