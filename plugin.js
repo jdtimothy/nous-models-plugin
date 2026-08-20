@@ -1,473 +1,177 @@
 /**
- * Hermes Desktop Plugin: Nous Provider Models & Pricing
+ * Hermes Desktop Plugin: Nous Models & Pricing
  *
- * Shows the Nous Portal model catalog with live pricing, original
- * pricing, current discount, context length, and free/paid-tier badges.
+ * Statusbar chip shows a live model count. Click it → a popup panel
+ * lists every Nous Portal model with current + original pricing, the
+ * discount %, context length, and free/paid-tier badges.
  *
- * Data is bundled at build time from fetch_models.json (produced by
- * fetch_models.py). To refresh: run fetch_models.py, then reload the
- * desktop plugins from ⌘K.
+ * Data is LIVE — the plugin fetches the public Nous endpoints directly
+ * from the browser every 10 minutes (both endpoints allow CORS). No
+ * pricing is baked into this file, so the plugin never needs
+ * regenerating to show new prices:
  *
- * Sources:
- *   - model-catalog.json   (https://hermes-agent.nousresearch.com/docs/api/model-catalog.json)
- *   - /v1/models           (https://inference-api.nousresearch.com/v1/models)
- *   - /api/nous/recommended-models (https://portal.nousresearch.com/api/nous/recommended-models)
+ *   - https://hermes-agent.nousresearch.com/docs/api/model-catalog.json
+ *       (redirects to nousresearch.github.io — CORS-enabled) → model list
+ *   - https://inference-api.nousresearch.com/v1/models  (CORS-enabled)
+ *       → current + original pricing, context length, :free variants
+ *
+ * Free-tier detection: a catalog model is flagged Free when a matching
+ * `:free` variant exists in /v1/models with $0 pricing.
+ *
+ * Self-contained: no Python backend, no config change, no gateway
+ * restart — drop plugin.js into desktop-plugins/<id>/ and reload.
+ *
+ * Plain ESM loaded uncompiled: UI is jsx() calls, NOT JSX syntax; only
+ * @hermes/plugin-sdk, react, react/jsx-runtime resolve.
  */
-import { cn, host, usePluginI18n, useValue } from '@hermes/plugin-sdk'
+import {
+  cn,
+  haptic,
+  host,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+  ScrollArea,
+  STATUSBAR_AREAS,
+  usePluginI18n,
+  useQuery,
+  useValue
+} from '@hermes/plugin-sdk'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
-// ── Bundled model data ────────────────────────────────────────────────────
-const MODEL_BUNDLE = JSON.parse(`{
-  "stats": {
-    "total": 31,
-    "free": 2,
-    "paid_recommended": 6,
-    "with_pricing": 31,
-    "avg_discount_pct": 23.9,
-    "fetched_at": "2026-08-20T17:11:04.723873+00:00"
-  },
-  "models": [
-    {
-      "id": "stepfun/step-3.7-flash",
-      "name": "stepfun/step-3.7-flash:free",
-      "input_per_1m": "$0.16",
-      "output_per_1m": "$0.92",
-      "input_original_per_1m": "$0.20",
-      "output_original_per_1m": "$1.15",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "262K",
-      "is_free": true,
-      "is_paid_recommended": true
-    },
-    {
-      "id": "tencent/hy3",
-      "name": "tencent/hy3:free",
-      "input_per_1m": "$0.11",
-      "output_per_1m": "$0.42",
-      "input_original_per_1m": "$0.13",
-      "output_original_per_1m": "$0.53",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "262K",
-      "is_free": true,
-      "is_paid_recommended": true
-    },
-    {
-      "id": "openai/gpt-5.6-luna-pro",
-      "name": "gpt-5.6-luna-pro",
-      "input_per_1m": "$0.20",
-      "output_per_1m": "$1.20",
-      "input_original_per_1m": "$1.00",
-      "output_original_per_1m": "$6.00",
-      "discount_input_pct": 80.0,
-      "discount_output_pct": 80.0,
-      "discount_avg_pct": 80.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.6-luna",
-      "name": "OpenAI: GPT-5.6 Luna",
-      "input_per_1m": "$0.20",
-      "output_per_1m": "$1.20",
-      "input_original_per_1m": "$1.00",
-      "output_original_per_1m": "$6.00",
-      "discount_input_pct": 80.0,
-      "discount_output_pct": 80.0,
-      "discount_avg_pct": 80.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": true
-    },
-    {
-      "id": "anthropic/claude-fable-5",
-      "name": "claude-fable-5",
-      "input_per_1m": "$8.00",
-      "output_per_1m": "$40.00",
-      "input_original_per_1m": "$10.00",
-      "output_original_per_1m": "$50.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "anthropic/claude-haiku-4.5",
-      "name": "claude-haiku-4.5",
-      "input_per_1m": "$0.80",
-      "output_per_1m": "$4.00",
-      "input_original_per_1m": "$1.00",
-      "output_original_per_1m": "$5.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "410K",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "anthropic/claude-opus-4.8",
-      "name": "claude-opus-4.8",
-      "input_per_1m": "$4.00",
-      "output_per_1m": "$20.00",
-      "input_original_per_1m": "$5.00",
-      "output_original_per_1m": "$25.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "anthropic/claude-opus-5",
-      "name": "claude-opus-5",
-      "input_per_1m": "$4.00",
-      "output_per_1m": "$20.00",
-      "input_original_per_1m": "$5.00",
-      "output_original_per_1m": "$25.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "anthropic/claude-sonnet-5",
-      "name": "claude-sonnet-5",
-      "input_per_1m": "$1.60",
-      "output_per_1m": "$8.00",
-      "input_original_per_1m": "$2.00",
-      "output_original_per_1m": "$10.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "deepseek/deepseek-v4-flash",
-      "name": "deepseek-v4-flash",
-      "input_per_1m": "$0.07",
-      "output_per_1m": "$0.13",
-      "input_original_per_1m": "$0.08",
-      "output_original_per_1m": "$0.16",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "deepseek/deepseek-v4-flash-0731",
-      "name": "deepseek-v4-flash-0731",
-      "input_per_1m": "$0.11",
-      "output_per_1m": "$0.22",
-      "input_original_per_1m": "$0.14",
-      "output_original_per_1m": "$0.28",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.3M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "deepseek/deepseek-v4-pro",
-      "name": "deepseek-v4-pro",
-      "input_per_1m": "$1.28",
-      "output_per_1m": "$2.56",
-      "input_original_per_1m": "$1.60",
-      "output_original_per_1m": "$3.20",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "deepseek/deepseek-v4-pro-0813",
-      "name": "deepseek-v4-pro-0813",
-      "input_per_1m": "$0.95",
-      "output_per_1m": "$2.85",
-      "input_original_per_1m": "$1.19",
-      "output_original_per_1m": "$3.56",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "sakana/fugu-ultra",
-      "name": "fugu-ultra",
-      "input_per_1m": "$4.00",
-      "output_per_1m": "$24.00",
-      "input_original_per_1m": "$5.00",
-      "output_original_per_1m": "$30.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "google/gemini-3.1-pro-preview",
-      "name": "gemini-3.1-pro-preview",
-      "input_per_1m": "$1.60",
-      "output_per_1m": "$9.60",
-      "input_original_per_1m": "$2.00",
-      "output_original_per_1m": "$12.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "google/gemini-3.7-flash",
-      "name": "gemini-3.7-flash",
-      "input_per_1m": "$0.30",
-      "output_per_1m": "$1.50",
-      "input_original_per_1m": "$0.38",
-      "output_original_per_1m": "$1.88",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "z-ai/glm-5.1",
-      "name": "glm-5.1",
-      "input_per_1m": "$0.77",
-      "output_per_1m": "$2.43",
-      "input_original_per_1m": "$0.97",
-      "output_original_per_1m": "$3.04",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "205K",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.4-mini",
-      "name": "gpt-5.4-mini",
-      "input_per_1m": "$0.60",
-      "output_per_1m": "$3.60",
-      "input_original_per_1m": "$0.75",
-      "output_original_per_1m": "$4.50",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "400K",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.5",
-      "name": "gpt-5.5",
-      "input_per_1m": "$4.00",
-      "output_per_1m": "$24.00",
-      "input_original_per_1m": "$5.00",
-      "output_original_per_1m": "$30.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.5-pro",
-      "name": "gpt-5.5-pro",
-      "input_per_1m": "$24.00",
-      "output_per_1m": "$144.00",
-      "input_original_per_1m": "$30.00",
-      "output_original_per_1m": "$180.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.6-sol-pro",
-      "name": "gpt-5.6-sol-pro",
-      "input_per_1m": "$2.00",
-      "output_per_1m": "$12.00",
-      "input_original_per_1m": "$2.50",
-      "output_original_per_1m": "$15.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.6-terra-pro",
-      "name": "gpt-5.6-terra-pro",
-      "input_per_1m": "$2.00",
-      "output_per_1m": "$12.00",
-      "input_original_per_1m": "$2.50",
-      "output_original_per_1m": "$15.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "x-ai/grok-4.6",
-      "name": "grok-4.6",
-      "input_per_1m": "$1.60",
-      "output_per_1m": "$4.80",
-      "input_original_per_1m": "$2.00",
-      "output_original_per_1m": "$6.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "500K",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "moonshotai/kimi-k3",
-      "name": "kimi-k3",
-      "input_per_1m": "$2.40",
-      "output_per_1m": "$12.00",
-      "input_original_per_1m": "$3.00",
-      "output_original_per_1m": "$15.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "xiaomi/mimo-v2.5-pro",
-      "name": "mimo-v2.5-pro",
-      "input_per_1m": "$0.35",
-      "output_per_1m": "$0.70",
-      "input_original_per_1m": "$0.43",
-      "output_original_per_1m": "$0.87",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "minimax/minimax-m3",
-      "name": "minimax-m3",
-      "input_per_1m": "$0.24",
-      "output_per_1m": "$0.96",
-      "input_original_per_1m": "$0.30",
-      "output_original_per_1m": "$1.20",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "nvidia/nemotron-3-super-120b-a12b",
-      "name": "nemotron-3-super-120b-a12b",
-      "input_per_1m": "$0.07",
-      "output_per_1m": "$0.32",
-      "input_original_per_1m": "$0.08",
-      "output_original_per_1m": "$0.40",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "openai/gpt-5.6-sol",
-      "name": "OpenAI: GPT-5.6 Sol",
-      "input_per_1m": "$4.00",
-      "output_per_1m": "$24.00",
-      "input_original_per_1m": "$5.00",
-      "output_original_per_1m": "$30.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": true
-    },
-    {
-      "id": "openai/gpt-5.6-terra",
-      "name": "OpenAI: GPT-5.6 Terra",
-      "input_per_1m": "$2.00",
-      "output_per_1m": "$12.00",
-      "input_original_per_1m": "$2.50",
-      "output_original_per_1m": "$15.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.1M",
-      "is_free": false,
-      "is_paid_recommended": true
-    },
-    {
-      "id": "qwen/qwen3.8-max",
-      "name": "qwen3.8-max",
-      "input_per_1m": "$1.60",
-      "output_per_1m": "$4.80",
-      "input_original_per_1m": "$2.00",
-      "output_original_per_1m": "$6.00",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": false
-    },
-    {
-      "id": "z-ai/glm-5.2",
-      "name": "z-ai/glm-5.2:US",
-      "input_per_1m": "$0.77",
-      "output_per_1m": "$2.43",
-      "input_original_per_1m": "$0.97",
-      "output_original_per_1m": "$3.04",
-      "discount_input_pct": 20.0,
-      "discount_output_pct": 20.0,
-      "discount_avg_pct": 20.0,
-      "context_length": "1.0M",
-      "is_free": false,
-      "is_paid_recommended": true
-    }
-  ]
-}`)
-
-// ── IDs ───────────────────────────────────────────────────────────────────
 const ID = 'nous-models'
 
-// ── Helpers ────────────────────────────────────────────────────────────────
+const CATALOG_URL = 'https://hermes-agent.nousresearch.com/docs/api/model-catalog.json'
+const PRICING_URL = 'https://inference-api.nousresearch.com/v1/models'
+
+// ---------------------------------------------------------------------------
+// Data fetching — live from the public Nous endpoints (React Query)
+// ---------------------------------------------------------------------------
+
+function formatPrice(tokenPrice) {
+  if (tokenPrice == null) return '—'
+  const perM = Number(tokenPrice) * 1_000_000
+  if (!isFinite(perM)) return '—'
+  if (perM === 0) return '$0.00'
+  if (perM < 0.01) return `$${perM.toFixed(4)}`
+  if (perM < 1) return `$${perM.toFixed(2)}`
+  return `$${perM.toFixed(2)}`
+}
+
+function calcDiscount(cur, orig) {
+  if (cur == null || orig == null) return null
+  const c = Number(cur), o = Number(orig)
+  if (!isFinite(c) || !isFinite(o) || o === 0) return null
+  return Math.round((1 - c / o) * 100 * 10) / 10
+}
+
+function contextStr(n) {
+  if (typeof n !== 'number') return '—'
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`
+  return String(n)
+}
+
+function baseId(id) {
+  for (const s of [':free', ':US', ':batch']) {
+    if (id.endsWith(s)) return id.slice(0, -s.length)
+  }
+  return id
+}
+
+async function fetchModels() {
+  // Fetch both endpoints in parallel.
+  const [catResp, priceResp] = await Promise.all([
+    fetch(CATALOG_URL, { headers: { Accept: 'application/json' } }),
+    fetch(PRICING_URL, { headers: { Accept: 'application/json' } })
+  ])
+  if (!catResp.ok) throw new Error(`catalog HTTP ${catResp.status}`)
+  if (!priceResp.ok) throw new Error(`pricing HTTP ${priceResp.status}`)
+
+  const [catalog, pricingData] = await Promise.all([catResp.json(), priceResp.json()])
+
+  const catalogModels = catalog?.providers?.nous?.models ?? []
+  const allModels = pricingData?.data ?? pricingData ?? []
+
+  // Index /v1/models by id, and collect :free variant ids.
+  const byId = new Map()
+  const freeVariantIds = new Set()
+  for (const m of allModels) {
+    const mid = m && m.id
+    if (!mid) continue
+    byId.set(mid, m)
+    if (mid.endsWith(':free')) freeVariantIds.add(baseId(mid))
+  }
+
+  const rows = catalogModels
+    .filter(e => e && e.id)
+    .map(e => {
+      const mid = e.id
+      const pm = byId.get(mid) || {}
+      const pricing = (pm && pm.pricing) || {}
+      const original = (pricing && pricing.original) || {}
+
+      const promptCur = pricing.prompt
+      const compCur = pricing.completion
+      const promptOrig = original.prompt
+      const compOrig = original.completion
+
+      const dIn = calcDiscount(promptCur, promptOrig)
+      const dOut = calcDiscount(compCur, compOrig)
+      let avg = null
+      if (dIn != null && dOut != null) avg = Math.round(((dIn + dOut) / 2) * 10) / 10
+      else if (dIn != null) avg = dIn
+      else if (dOut != null) avg = dOut
+
+      let name = mid.includes('/') ? mid.split('/')[1] : mid
+      if (name.startsWith('~')) name = name.slice(1)
+
+      return {
+        id: mid,
+        name,
+        input_per_1m: formatPrice(promptCur),
+        output_per_1m: formatPrice(compCur),
+        input_original_per_1m: formatPrice(promptOrig),
+        output_original_per_1m: formatPrice(compOrig),
+        discount_avg_pct: avg,
+        context_length: contextStr(pm.context_length),
+        is_free: freeVariantIds.has(mid)
+      }
+    })
+
+  // Sort: free first, then by discount desc, then name.
+  rows.sort((a, b) => {
+    if (a.is_free !== b.is_free) return a.is_free ? -1 : 1
+    const da = a.discount_avg_pct ?? -1
+    const db = b.discount_avg_pct ?? -1
+    if (db !== da) return db - da
+    return a.name.localeCompare(b.name)
+  })
+
+  const withDisc = rows.filter(r => r.discount_avg_pct != null).map(r => r.discount_avg_pct)
+  const stats = {
+    total: rows.length,
+    free: rows.filter(r => r.is_free).length,
+    avg_discount_pct: withDisc.length ? Math.round((withDisc.reduce((a, b) => a + b, 0) / withDisc.length) * 10) / 10 : null,
+    fetched_at: new Date().toISOString()
+  }
+
+  return { stats, models: rows }
+}
+
+function useModels() {
+  return useQuery({
+    queryKey: [ID, 'models'],
+    queryFn: fetchModels,
+    staleTime: 10 * 60 * 1000,
+    refetchInterval: 10 * 60 * 1000,
+    retry: 2
+  })
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 function DiscountBadge({ pct }) {
   if (pct == null) return jsx('span', { children: '—' })
@@ -481,166 +185,193 @@ function DiscountBadge({ pct }) {
   })
 }
 
-function TierBadge({ isFree, isPaid }) {
+function TierBadge({ isFree }) {
   if (isFree) return jsx('span', {
     className: cn(
-      'inline-flex h-5 min-w-[28px] items-center justify-center rounded-full border',
-      'px-1 text-[0.65rem] font-medium text-white',
-      'bg-emerald-500/90 border-emerald-400/40'
+      'inline-flex h-5 min-w-[28px] items-center justify-center rounded-full border px-1',
+      'text-[0.65rem] font-medium text-white bg-emerald-500/90 border-emerald-400/40'
     ),
     children: 'Free'
   })
-  if (isPaid) return jsx('span', {
-    className: cn(
-      'inline-flex h-5 min-w-[36px] items-center justify-center rounded-full border',
-      'px-1.5 text-[0.65rem] font-medium text-(--ui-accent)',
-      'bg-(--ui-accent)/10 border-(--ui-accent)/30'
-    ),
-    children: 'Paid'
-  })
   return jsx('span', {
     className: 'text-(--ui-text-tertiary) text-[0.65rem]',
-    children: 'Standard'
+    children: 'Std'
   })
 }
-
-// ── Model row ──────────────────────────────────────────────────────────────
 
 function ModelRow({ model }) {
   return jsxs('div', {
     className: cn(
-      'flex items-center gap-3 px-2 py-1.5 rounded-md',
-      'hover:bg-(--chrome-action-hover) transition-colors cursor-default'
+      'flex items-center gap-2.5 px-1.5 py-1.5 rounded-md',
+      'hover:bg-(--chrome-action-hover) transition-colors'
     ),
     'data-testid': `model-${model.id}`,
     children: [
-      // Tier badge
-      jsx(TierBadge, { isFree: model.is_free, isPaid: model.is_paid_recommended }),
-
-      // Name + recommended tag
+      jsx(TierBadge, { isFree: model.is_free }),
       jsx('div', {
         className: 'min-w-0 flex-1',
-        children: jsxs('div', {
-          className: 'text-sm font-medium truncate',
-          children: [
-            model.name,
-            model.is_paid_recommended
-              ? jsx('span', { className: 'ml-1.5 text-(--ui-text-tertiary) text-[0.65rem] font-normal', children: '★ recommended' })
-              : null,
-          ]
+        children: jsx('div', {
+          className: 'text-[0.8125rem] font-medium truncate',
+          children: model.name
         })
       }),
-
-      // Input price
       jsx('div', {
-        className: 'w-[72px] text-right text-sm tabular-nums text-(--ui-text-secondary)',
-        children: model.input_per_1m
+        className: 'w-[52px] text-right text-[0.75rem] tabular-nums text-(--ui-text-secondary)',
+        title: `in ${model.input_per_1m} / out ${model.output_per_1m}`,
+        children: `${model.input_per_1m}/${model.output_per_1m}`
       }),
-
-      // Output price
       jsx('div', {
-        className: 'w-[72px] text-right text-sm tabular-nums text-(--ui-text-secondary)',
-        children: model.output_per_1m
-      }),
-
-      // Original prices (smaller, tertiary)
-      jsx('div', {
-        className: 'w-[80px] text-right text-[0.65rem] tabular-nums text-(--ui-text-tertiary) opacity-60',
-        children: `${model.input_original_per_1m} / ${model.output_original_per_1m}`
-      }),
-
-      // Discount badge
-      jsx('div', {
-        className: 'w-[52px] text-right',
+        className: 'w-[42px] text-right',
         children: jsx(DiscountBadge, { pct: model.discount_avg_pct })
-      }),
-
-      // Context
-      jsx('div', {
-        className: 'w-[48px] text-right text-sm tabular-nums text-(--ui-text-tertiary)',
-        children: model.context_length
-      }),
+      })
     ]
   })
 }
 
-// ── Pane ───────────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Popup panel content
+// ---------------------------------------------------------------------------
 
-function NousModelsPane() {
+function ModelsPanel() {
   const t = usePluginI18n(ID)
-  const bundle = MODEL_BUNDLE
-  const models = bundle?.models ?? []
-  const stats = bundle?.stats
+  const { data, isLoading, isError, refetch, isFetching } = useModels()
+
+  const models = data?.models ?? []
+  const stats = data?.stats ?? null
+
+  const header = stats
+    ? `${stats.total} models · ${stats.free} free`
+    : ''
 
   return jsxs('div', {
-    className: 'flex h-full flex-col text-sm',
+    className: 'flex w-[380px] flex-col gap-1',
     children: [
-      // Header
+      // Header row: title + stats + refresh button
       jsxs('div', {
-        className: 'flex items-center gap-3 px-3 py-2 border-b border-(--ui-stroke-secondary)',
+        className: 'flex items-center justify-between gap-2 px-1 pt-1',
         children: [
-          jsx('div', { className: 'font-medium text-lg', children: t('paneTitle') }),
-          jsx('span', { className: 'text-(--ui-text-tertiary) text-[0.65rem]',
-            children: stats ? `${stats.total} models · ${stats.free} free · ${stats.paid_recommended} paid` : '' }),
+          jsxs('div', {
+            className: 'min-w-0',
+            children: [
+              jsx('div', { className: 'text-sm font-semibold', children: t('title') }),
+              jsx('div', {
+                className: 'truncate text-[0.65rem] text-(--ui-text-tertiary)',
+                children: stats ? header : t('loading')
+              })
+            ]
+          }),
+          jsx('button', {
+            type: 'button',
+            onClick: () => { haptic('tap'); refetch() },
+            disabled: isFetching,
+            title: t('refreshTip'),
+            className: cn(
+              'flex h-6 w-6 shrink-0 items-center justify-center rounded-md',
+              'text-(--ui-text-secondary) transition-colors',
+              'hover:bg-(--chrome-action-hover) hover:text-foreground',
+              'disabled:opacity-50'
+            ),
+            children: isFetching ? '…' : '↻'
+          })
         ]
       }),
 
       // Column headers
       jsxs('div', {
-        className: 'flex items-center gap-3 px-2 py-1.5 text-(--ui-text-tertiary) text-[0.65rem] uppercase tracking-wide border-b border-(--ui-stroke-secondary)',
+        className: 'flex items-center gap-2.5 px-1.5 pb-0.5 text-[0.6rem] uppercase tracking-wide text-(--ui-text-tertiary)',
         children: [
-          jsx('div', { className: 'w-[72px]' }),
+          jsx('div', { className: 'w-[52px]' }),
           jsx('div', { className: 'min-w-0 flex-1' }),
-          jsx('div', { className: 'w-[72px] text-right' }),
-          jsx('div', { className: 'w-[72px] text-right' }),
-          jsx('div', { className: 'w-[80px] text-right', children: 'Original ($/1M)' }),
-          jsx('div', { className: 'w-[52px] text-right', children: 'Disc.' }),
-          jsx('div', { className: 'w-[48px] text-right', children: 'Ctx' }),
+          jsx('div', { className: 'w-[52px] text-right', children: 'In/Out' }),
+          jsx('div', { className: 'w-[42px] text-right', children: 'Disc' })
         ]
       }),
 
-      // Scrollable rows
-      jsxs('div', {
-        className: 'flex-1 overflow-auto',
-        children: models.length === 0
-          ? jsx('div', { className: 'flex-1 flex items-center justify-center text-(--ui-text-tertiary) text-sm', children: t('empty') })
-          : models.map((m) => jsx(ModelRow, { key: m.id, model: m }))
+      // Body
+      jsx('div', {
+        className: 'max-h-[320px]',
+        children: isLoading
+          ? jsx('div', { className: 'flex h-24 items-center justify-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('loading') })
+          : isError
+            ? jsx('div', {
+                className: 'flex flex-col items-center gap-1 p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)',
+                children: [
+                  jsx('div', { children: t('error') }),
+                  jsx('button', {
+                    type: 'button',
+                    onClick: () => refetch(),
+                    className: cn(
+                      'rounded-md border border-(--ui-stroke-secondary) px-2 py-0.5 text-[0.7rem]',
+                      'hover:bg-(--chrome-action-hover)'
+                    ),
+                    children: t('retry')
+                  })
+                ]
+              })
+            : jsx(ScrollArea, {
+                className: 'h-full',
+                children: models.length === 0
+                  ? jsx('div', { className: 'p-3 text-center text-[0.75rem] text-(--ui-text-tertiary)', children: t('empty') })
+                  : jsxs('div', {
+                      className: 'flex flex-col',
+                      children: models.map(m => jsx(ModelRow, { key: m.id, model: m }))
+                    })
+              })
       }),
 
-      // Footer / stats
+      // Footer
       stats ? jsxs('div', {
-        className: 'flex items-center gap-4 px-3 py-2 border-t border-(--ui-stroke-secondary) text-(--ui-text-tertiary) text-[0.65rem]',
+        className: 'flex items-center justify-between border-t border-(--ui-stroke-secondary) px-1 pt-1 text-[0.6rem] text-(--ui-text-tertiary)',
         children: [
-          jsx('span', { children: `Avg discount: ${Math.round(stats.avg_discount_pct)}%` }),
-          jsx('span', { children: `Updated: ${new Date(stats.fetched_at).toLocaleString()}` }),
-          jsx('span', { className: 'ml-auto text-(--ui-text-quaternary)',
-            children: 'Sources: model-catalog · /v1/models · /api/nous/recommended-models' }),
+          jsx('span', { children: stats.avg_discount_pct != null ? `Avg discount ${Math.round(stats.avg_discount_pct)}%` : '' }),
+          jsx('span', { children: t('live') })
         ]
-      }) : null,
+      }) : null
     ]
   })
 }
 
-// ── Statusbar chip (compact model count) ───────────────────────────────────
+// ---------------------------------------------------------------------------
+// Statusbar chip — opens the popup on click
+// ---------------------------------------------------------------------------
 
 function ModelsChip() {
   const t = usePluginI18n(ID)
-  const bundle = MODEL_BUNDLE
-  const stats = bundle?.stats
+  const { data } = useModels()
+  const stats = data?.stats ?? null
+  const chipLabel = stats ? `${stats.total} models` : 'Nous'
 
-  return jsx('div', {
-    className: cn(
-      'inline-flex h-5 items-center gap-1 px-1.5 text-(--ui-text-tertiary) hover:bg-(--chrome-action-hover) hover:text-foreground',
-      'transition-colors text-[0.6875rem] cursor-default'
-    ),
-    children: stats
-      ? [jsx('span', { className: 'text-(--ui-accent)', children: stats.total }),
-         jsx('span', { children: `/${stats.free} free` })]
-      : t('chipLoading')
+  return jsx(Popover, {
+    children: [
+      jsx(PopoverTrigger, {
+        asChild: true,
+        children: jsx('button', {
+          type: 'button',
+          title: t('chipTip'),
+          className: cn(
+            'flex h-full items-center gap-1 px-1.5 text-[0.6875rem] transition-colors',
+            'text-(--ui-text-secondary) hover:bg-(--chrome-action-hover) hover:text-foreground'
+          ),
+          children: [
+            jsx('span', { className: 'text-(--ui-accent)', children: '◈' }),
+            jsx('span', { children: chipLabel })
+          ]
+        })
+      }),
+      jsx(PopoverContent, {
+        align: 'end',
+        side: 'top',
+        sideOffset: 6,
+        className: 'w-auto p-2',
+        children: jsx(ModelsPanel, {})
+      })
+    ]
   })
 }
 
-// ── Registration ───────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Registration
+// ---------------------------------------------------------------------------
 
 export default {
   id: ID,
@@ -648,23 +379,21 @@ export default {
   register(ctx) {
     ctx.i18n.register({
       en: {
-        paneTitle: 'Nous Models',
-        empty: 'No models loaded',
-        chipLoading: '…',
+        title: 'Nous Models',
+        loading: 'Loading…',
+        empty: 'No models available',
+        error: 'Could not load models — check your connection.',
+        retry: 'Retry',
+        refreshTip: 'Refresh prices',
+        live: 'Live · updates every 10 min',
+        chipTip: 'Nous models & pricing — click to view'
       }
     })
 
-    ctx.register({
-      id: 'pane',
-      area: 'panes',
-      title: 'Nous Models',
-      data: { placement: 'right', width: '420px' },
-      render: () => jsx(NousModelsPane, {})
-    })
-
+    // Statusbar chip with a click-to-open popup. No sidebar pane.
     ctx.register({
       id: 'chip',
-      area: 'statusBar.right',
+      area: STATUSBAR_AREAS.right,
       order: 140,
       render: () => jsx(ModelsChip, {})
     })

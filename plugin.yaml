@@ -1,0 +1,5 @@
+name: nous-models
+version: 1.0.0
+description: "Nous Portal models with live pricing, discounts, and tier badges. Desktop statusbar chip opens a popup; backend fetches live data."
+author: "Hermes"
+kind: backend
