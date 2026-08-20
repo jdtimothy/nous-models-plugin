@@ -121,7 +121,7 @@ function processBundle(catalog, v1models) {
 
   // Surface any :free model whose base isn't in the curated catalog. The
   // terminal lists all of /v1/models, but the catalog only carries a subset;
-  // free models like upstage/solar-pro4:free would otherwise never appear.
+  // free models not in the catalog would otherwise never appear.
   const catalogBaseIds = new Set(rows.map(r => r.id))
   for (const m of v1models.data) {
     if (!m.id.endsWith(':free')) continue
