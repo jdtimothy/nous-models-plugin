@@ -303,10 +303,10 @@ function ModelRow({ model, isCurrent, onSwitch }) {
           fontSize: '10px',
           fontWeight: 500,
           color: 'var(--ui-text-tertiary)',
-          opacity: 0,
-          transition: 'opacity 100ms'
+          opacity: 1,
+          transition: 'background-color 100ms, color 100ms'
         },
-        className: 'group-hover:opacity-100 hover:bg-(--chrome-action-hover) hover:text-foreground',
+        className: 'hover:bg-(--chrome-action-hover) hover:text-foreground',
         children: 'default'
       })
     ]
