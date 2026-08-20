@@ -10,6 +10,8 @@ free-tier badges — right in the desktop app's status bar.
   the browser every 10 minutes. Nothing is baked in, so it always shows the
   current prices without ever regenerating or reinstalling the plugin.
 
+![Nous Models & Pricing popup](docs/screenshot.png)
+
 ## What it shows
 
 Clicking the statusbar chip opens a popup with each model's:
