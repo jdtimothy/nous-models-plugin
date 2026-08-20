@@ -11,8 +11,8 @@
 
 import * as React from 'react'
 import { jsx } from 'react/jsx-runtime'
-import { host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, haptic, atom, computed, useValue } from '@hermes/plugin-sdk'
-const { useState, useEffect, useCallback, useMemo } = React
+import { host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, Codicon, haptic } from '@hermes/plugin-sdk'
+const { useState, useEffect, useCallback } = React
 
 // ---- Constants ----
 const PANEL_W = 680
@@ -86,27 +86,18 @@ function processBundle(catalog, v1models) {
   return { models: rows, freeCount, total: rows.length, avgDiscount: avgDisc, fetchedAt: Date.now() }
 }
 
-// ---- Live session model tracker ----
-// host.state.model is the composer's sticky UI state, NOT the live agent
-// model. The authoritative source is the gateway's session.info event, which
-// carries the real model/provider the agent runs on. We subscribe once and
-// keep { runtimeId -> { model, provider } }.
-const liveModels = atom({})
-
-// Track the focused/active runtime id reactively from host.state.
+// ---- Focused runtime id ----
+// Use the focused tile when there is one; fall back to the primary active
+// runtime. This is the same targeting rule used by the desktop model picker.
 function getRuntimeId() {
   try { return host.state.focusedSessionId?.get?.() ?? host.state.focusedSessionId ?? null } catch {}
   try { return host.state.activeSessionId?.get?.() ?? host.state.activeSessionId ?? null } catch {}
   return null
 }
 
-function normalizeModel(value) {
-  if (value == null) return ''
-  const raw = String(value).trim()
-  // Strip any trailing flags like "--provider nous --session"
-  const i = raw.search(/\s/)
-  return (i >= 0 ? raw.slice(0, i) : raw).toLowerCase()
-}
+// The popup intentionally does not mark any row as "now". The desktop's
+// composer model is sticky UI state and session.info events are asynchronous;
+// showing a possibly stale highlight is worse than leaving the list neutral.
 
 // ---- Switch model via gateway RPC (same path the app's own picker uses) ----
 async function setModel({ model, scope = 'session' }) {
@@ -137,7 +128,7 @@ function fmtPrice(p) {
 }
 
 // ---- Component: one model row ----
-function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
+function ModelRow({ model, onSetDefault, onSetSession }) {
   const rowStyle = {
     display: 'flex',
     alignItems: 'center',
@@ -146,7 +137,7 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
     padding: '0 12px',
     borderRadius: '6px',
     cursor: 'pointer',
-    backgroundColor: isCurrent ? 'var(--ui-accent-muted, rgba(59,130,246,0.12))' : 'transparent',
+    backgroundColor: 'transparent',
     transition: 'background-color 80ms',
   }
   const nameStyle = {
@@ -156,7 +147,7 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
     textOverflow: 'ellipsis',
     whiteSpace: 'nowrap',
     fontSize: '13px',
-    fontWeight: isCurrent ? 600 : 400,
+    fontWeight: 400,
     color: 'var(--foreground)',
   }
   const badgeBase = {
@@ -176,8 +167,8 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
 
   return jsx('div', {
     style: rowStyle,
-    onMouseEnter: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'var(--chrome-action-hover, rgba(255,255,255,0.04))' },
-    onMouseLeave: (e) => { if (!isCurrent) e.currentTarget.style.backgroundColor = 'transparent' },
+    onMouseEnter: (e) => { e.currentTarget.style.backgroundColor = 'var(--chrome-action-hover, rgba(255,255,255,0.04))' },
+    onMouseLeave: (e) => { e.currentTarget.style.backgroundColor = 'transparent' },
     onClick: async () => {
       tap()
       try {
@@ -209,12 +200,7 @@ function ModelRow({ model, isCurrent, onSetDefault, onSetSession }) {
         style: { fontSize: '11px', width: '46px', textAlign: 'right', fontWeight: 600, color: model.discount ? 'var(--accent)' : 'var(--muted-foreground)', flexShrink: 0 },
         children: model.discount == null ? '—' : `-${model.discount}%`
       }),
-      isCurrent
-        ? jsx('span', {
-            style: { fontSize: '10px', padding: '0 6px', borderRadius: '4px', backgroundColor: 'var(--accent)', color: 'var(--accent-fg, #fff)', fontWeight: 700, height: '18px', lineHeight: '18px', flexShrink: 0 },
-            children: 'now'
-          })
-        : jsx('button', {
+      jsx('button', {
             style: {
               appearance: 'none', border: '1px solid var(--ui-stroke-secondary)', borderRadius: '4px',
               background: 'transparent', color: 'var(--ui-text-secondary)', fontSize: '10px',
@@ -245,20 +231,9 @@ function NousPopup() {
   const [bundle, setBundle] = useState(null)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
-  const [nowModel, setNowModel] = useState(null)
 
-  // Subscribe once to the live session.info events to track the real model.
-  useEffect(() => {
-    const dispose = host.onEvent('session.info', (evt) => {
-      const sid = evt?.session_id ?? evt?.data?.session_id ?? getRuntimeId()
-      const info = evt?.data?.info ?? evt?.info ?? evt?.data ?? {}
-      const model = info?.model
-      if (model) {
-        liveModels.set({ ...liveModels.get(), [sid]: { model, provider: info.provider } })
-      }
-    })
-    return () => { try { dispose?.() } catch {} }
-  }, [])
+  // The popup list is intentionally neutral: no stale "now" highlight.
+  // The model switch actions remain available on every row.
 
   const load = useCallback(async () => {
     setError(null)
@@ -282,12 +257,6 @@ function NousPopup() {
     const id = setInterval(() => { setRefreshing(true); void load().finally(() => setRefreshing(false)) }, 10 * 60 * 1000)
     return () => clearInterval(id)
   }, [open, load])
-
-  // The LIVE current model for the focused session (from session.info).
-  const focusedId = useValue(host.state.focusedSessionId) ?? useValue(host.state.activeSessionId) ?? null
-  const liveState = useValue(liveModels)
-  const liveForSession = focusedId ? liveState[focusedId] : null
-  const currentSlug = normalizeModel(liveForSession?.model) || normalizeModel(useValue(host.state.model))
 
   // Actions
   const onSetDefault = useCallback(async (modelId) => {
@@ -338,8 +307,8 @@ function NousPopup() {
         },
         title: 'Nous Models & Pricing — click to open',
         children: [
-          jsx('span', { children: bundle ? `${bundle.total}/${bundle.freeCount}` : '...' }),
-          refreshing ? jsx('span', { style: { fontSize: '8px' }, children: '↻' }) : null,
+        jsx(Codicon, { name: 'symbol-class', size: '0.82rem', style: { color: 'var(--ui-text-tertiary)' } }),
+        jsx('span', { children: 'Models' }),
         ]
       })
     }),
@@ -374,7 +343,6 @@ function NousPopup() {
                 jsx(ModelRow, {
                   key: m.id,
                   model: m,
-                  isCurrent: m.id === currentSlug,
                   onSetDefault,
                   onSetSession,
                 })
