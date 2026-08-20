@@ -307,8 +307,8 @@ function NousPopup() {
         },
         title: 'Nous Models & Pricing — click to open',
         children: [
-        jsx(Codicon, { name: 'symbol-class', size: '0.82rem', style: { color: 'var(--ui-text-tertiary)' } }),
-        jsx('span', { children: 'Models' }),
+        jsx(Codicon, { name: 'list-tree', size: '0.82rem', style: { color: 'var(--ui-text-tertiary)' } }),
+        jsx('span', { children: 'Nous' }),
         ]
       })
     }),
