@@ -469,12 +469,7 @@ const ID = 'nous-models'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
-function fmtNum(n: number | null | undefined): string {
-  if (n == null) return '—'
-  return n.toLocaleString(undefined, { maximumFractionDigits: 1 })
-}
-
-function DiscountBadge({ pct }: { pct: number | null | undefined }) {
+function DiscountBadge({ pct }) {
   if (pct == null) return jsx('span', { children: '—' })
   const color = pct >= 50 ? 'var(--ui-accent)'
     : pct >= 20 ? 'var(--ui-text-secondary)'
@@ -486,7 +481,7 @@ function DiscountBadge({ pct }: { pct: number | null | undefined }) {
   })
 }
 
-function TierBadge({ isFree, isPaid }: { isFree: boolean; isPaid: boolean }) {
+function TierBadge({ isFree, isPaid }) {
   if (isFree) return jsx('span', {
     className: cn(
       'inline-flex h-5 min-w-[28px] items-center justify-center rounded-full border',
@@ -509,23 +504,9 @@ function TierBadge({ isFree, isPaid }: { isFree: boolean; isPaid: boolean }) {
   })
 }
 
-// ── Column header ──────────────────────────────────────────────────────────
-
-function ColHeader({ label, width }: { label: string; width?: number }) {
-  return jsx('div', {
-    className: 'flex items-center gap-1 text-(--ui-text-tertiary) text-[0.65rem] uppercase tracking-wide',
-    style: width != null ? { width } : undefined,
-    children: label
-  })
-}
-
 // ── Model row ──────────────────────────────────────────────────────────────
 
-interface RowProps {
-  model: (typeof MODEL_BUNDLE)['models'][number]
-}
-
-function ModelRow({ model }: RowProps) {
+function ModelRow({ model }) {
   return jsxs('div', {
     className: cn(
       'flex items-center gap-3 px-2 py-1.5 rounded-md',
@@ -536,16 +517,18 @@ function ModelRow({ model }: RowProps) {
       // Tier badge
       jsx(TierBadge, { isFree: model.is_free, isPaid: model.is_paid_recommended }),
 
-      // Name
+      // Name + recommended tag
       jsx('div', {
         className: 'min-w-0 flex-1',
         children: jsxs('div', {
           className: 'text-sm font-medium truncate',
-          children: [model.name, model.is_paid_recommended
-            ? jsx('span', { className: 'ml-1.5 text-(--ui-text-tertiary) text-[0.65rem] font-normal', children: '★ recommended' })
-            : null]
+          children: [
+            model.name,
+            model.is_paid_recommended
+              ? jsx('span', { className: 'ml-1.5 text-(--ui-text-tertiary) text-[0.65rem] font-normal', children: '★ recommended' })
+              : null,
+          ]
         })
-
       }),
 
       // Input price
@@ -566,7 +549,7 @@ function ModelRow({ model }: RowProps) {
         children: `${model.input_original_per_1m} / ${model.output_original_per_1m}`
       }),
 
-      // Discount
+      // Discount badge
       jsx('div', {
         className: 'w-[52px] text-right',
         children: jsx(DiscountBadge, { pct: model.discount_avg_pct })
@@ -585,9 +568,9 @@ function ModelRow({ model }: RowProps) {
 
 function NousModelsPane() {
   const t = usePluginI18n(ID)
-  const bundle = MODEL_BUNDLE as (typeof MODEL_BUNDLE) | null
-  const models = (bundle?.models ?? []) as (typeof MODEL_BUNDLE)['models']
-  const stats = bundle?.stats as typeof bundle['stats'] | null
+  const bundle = MODEL_BUNDLE
+  const models = bundle?.models ?? []
+  const stats = bundle?.stats
 
   return jsxs('div', {
     className: 'flex h-full flex-col text-sm',
@@ -597,7 +580,8 @@ function NousModelsPane() {
         className: 'flex items-center gap-3 px-3 py-2 border-b border-(--ui-stroke-secondary)',
         children: [
           jsx('div', { className: 'font-medium text-lg', children: t('paneTitle') }),
-          jsx('span', { className: 'text-(--ui-text-tertiary) text-[0.65rem]', children: stats ? `${stats.total} models · ${stats.free} free · ${stats.paid_recommended} paid` : '' }),
+          jsx('span', { className: 'text-(--ui-text-tertiary) text-[0.65rem]',
+            children: stats ? `${stats.total} models · ${stats.free} free · ${stats.paid_recommended} paid` : '' }),
         ]
       }),
 
@@ -627,9 +611,10 @@ function NousModelsPane() {
       stats ? jsxs('div', {
         className: 'flex items-center gap-4 px-3 py-2 border-t border-(--ui-stroke-secondary) text-(--ui-text-tertiary) text-[0.65rem]',
         children: [
-          jsx('span', { children: `Avg discount: ${fmtNum(stats.avg_discount_pct)}%` }),
+          jsx('span', { children: `Avg discount: ${Math.round(stats.avg_discount_pct)}%` }),
           jsx('span', { children: `Updated: ${new Date(stats.fetched_at).toLocaleString()}` }),
-          jsx('span', { className: 'ml-auto', children: 'Sources: model-catalog · /v1/models · /api/nous/recommended-models' }),
+          jsx('span', { className: 'ml-auto text-(--ui-text-quaternary)',
+            children: 'Sources: model-catalog · /v1/models · /api/nous/recommended-models' }),
         ]
       }) : null,
     ]
@@ -640,8 +625,8 @@ function NousModelsPane() {
 
 function ModelsChip() {
   const t = usePluginI18n(ID)
-  const bundle = MODEL_BUNDLE as (typeof MODEL_BUNDLE) | null
-  const stats = bundle?.stats as typeof bundle['stats'] | null
+  const bundle = MODEL_BUNDLE
+  const stats = bundle?.stats
 
   return jsx('div', {
     className: cn(
@@ -666,13 +651,6 @@ export default {
         paneTitle: 'Nous Models',
         empty: 'No models loaded',
         chipLoading: '…',
-        free: 'Free',
-        paid: 'Paid',
-        standard: 'Standard',
-        discount: 'Disc.',
-        ctx: 'Ctx',
-        input: 'In',
-        output: 'Out',
       }
     })
 
