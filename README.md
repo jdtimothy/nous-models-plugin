@@ -4,7 +4,7 @@ A Hermes desktop plugin that shows the Nous Portal model catalog with **live**
 pricing, original pricing, current discount percentages, context lengths, and
 free-tier badges — right in the desktop app's status bar.
 
-- **Statusbar chip** shows the live model count. Click it → a popup panel
+- **Statusbar chip** — a catalog icon + "Nous". Click it → a popup panel
   lists every Nous Portal model.
 - **Live data** — the plugin fetches the public Nous endpoints directly from
   the browser every 10 minutes. Nothing is baked in, so it always shows the
@@ -17,7 +17,7 @@ Clicking the statusbar chip opens a popup with each model's:
 | Column | Meaning |
 |--------|---------|
 | Tier badge | `Free` (green) or `Std` |
-| Name | Model name (e.g. `gpt-5.6-terra`), with a `now` tag on the active model |
+| Name | Model name (e.g. `gpt-5.6-terra`) |
 | In/Out | Current price per 1M input/output tokens (USD) |
 | Disc | Average input+output discount % vs original price |
 
@@ -73,9 +73,6 @@ Self-contained plain-JS ESM plugin. Only `@hermes/plugin-sdk`, `react`, and
 `react/jsx-runtime` resolve. UI uses `jsx()` calls (not JSX syntax); the file
 is loaded uncompiled.
 
-## Publish to GitHub
+## License
 
-```
-git remote add origin <your-repo-url>
-git push -u origin master
-```
+MIT — see [LICENSE](LICENSE).
