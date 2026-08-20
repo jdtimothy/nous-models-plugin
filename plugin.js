@@ -253,7 +253,7 @@ function NousPopup() {
     return () => clearInterval(id)
   }, [open, load])
 
-  // Exact current-model match: strip flags from "model --provider nous --session"
+  // Exact current-model match: strip any trailing flags off the stored value.
   function getCurrentModelSlug() {
     const raw = String(currentModel || '').trim()
     const firstSpace = raw.search(/\s/)
