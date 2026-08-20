@@ -337,7 +337,15 @@ function ModelsPanel() {
     }
   }
 
-  const currentSlug = String(currentModel || '').toLowerCase()
+  function getCurrentModelSlug() {
+    const raw = String(currentModel || '').trim()
+    // Stored value looks like: "provider/model --provider provider --session|--global"
+    const firstSpace = raw.indexOf(' ')
+    const rawId = firstSpace >= 0 ? raw.slice(0, firstSpace) : raw
+    return rawId.toLowerCase()
+  }
+
+  const currentSlug = getCurrentModelSlug()
 
   return jsxs('div', {
     style: { display: 'flex', flexDirection: 'column', gap: '4px', width: `${PANEL_W}px` },
@@ -384,8 +392,7 @@ function ModelsPanel() {
         ]
       }),
 
-      // Body — fixed height + overflow-y:auto (inline style, not a Tailwind
-      // arbitrary class, so the scroll actually works in the shipped CSS).
+      // Body
       jsx('div', {
         style: { height: '300px', overflowY: 'auto' },
         children: isLoading
@@ -408,14 +415,17 @@ function ModelsPanel() {
               ? jsx('div', { style: { padding: '12px', textAlign: 'center', fontSize: '12px', color: 'var(--ui-text-tertiary)' }, children: t('empty') })
               : jsxs('div', {
                   style: { display: 'flex', flexDirection: 'column' },
-                  children: models.map(m =>
-                    jsx(ModelRow, {
+                  children: models.map(m => {
+                    const baseMid = baseId(m.id)
+                    const baseName = baseMid.split('/')[1]?.toLowerCase() || ''
+                    const isCurrent = currentSlug === baseMid || currentSlug === m.id
+                    return jsx(ModelRow, {
                       key: m.id,
                       model: m,
-                      isCurrent: currentSlug.includes(baseId(m.id).split('/')[1]) || currentSlug.includes(m.name),
+                      isCurrent,
                       onSwitch
                     })
-                  )
+                  })
                 })
       }),
 
