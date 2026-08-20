@@ -331,11 +331,7 @@ function ModelsPanel() {
   const onSwitch = async (model, scope) => {
     haptic('tap')
     try {
-      const res = await setModel({ model: model.id, scope })
-      const label = scope === 'global' ? 'Default model' : 'Session model'
-      // A mid-turn session switch is deferred to the next turn — say so.
-      const suffix = res && res.deferred ? ' (applies next turn)' : ''
-      host.notify({ kind: 'success', message: `${label} → ${model.name}${suffix}` })
+      await setModel({ model: model.id, scope })
     } catch (err) {
       host.notify({ kind: 'error', message: `Could not switch to ${model.name} (${scope}): ${err?.message || err}` })
     }
