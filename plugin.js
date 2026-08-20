@@ -41,6 +41,9 @@ function processBundle(catalog, v1models) {
   // derive tier from the :free counterpart
   const isFree = (id) => byId.has(id + ':free')
 
+  const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
+  const clampDisc = (d) => { if (d == null) return null; if (d < 0) return 0; if (d > 99) return 99; return d }
+
   const rows = catalogRows
     .map(m => {
       const id = typeof m === 'string' ? m : m.id
@@ -52,7 +55,6 @@ function processBundle(catalog, v1models) {
         // Free badge and the submitted model stay consistent.
         const v1 = freeEntry
         if (!v1) return null
-        const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
         const inp = num(v1.pricing?.prompt)
         const out = num(v1.pricing?.completion)
         const origPrompt = num(v1.pricing?.original?.prompt)
@@ -68,7 +70,6 @@ function processBundle(catalog, v1models) {
             disc = Math.round((1 - avgCur / avgOrig) * 100)
           }
         }
-        if (disc != null) { if (disc < 0) disc = 0; if (disc > 99) disc = 99 }
         return {
           id,
           selectableId: freeVar,
@@ -78,14 +79,13 @@ function processBundle(catalog, v1models) {
           badge: 'Free',
           input: inp,
           output: out,
-          discount: disc,
+          discount: clampDisc(disc),
           ctx: v1.context_length ?? null,
         }
       }
 
       const v1 = byId.get(id)
       if (!v1) return null
-      const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
       const inp = num(v1.pricing?.prompt)
       const out = num(v1.pricing?.completion)
       const origPrompt = num(v1.pricing?.original?.prompt)
@@ -95,8 +95,6 @@ function processBundle(catalog, v1models) {
         const avgOrig = (origPrompt + origCompletion) / 2
         const avgCur = (inp + out) / 2
         disc = Math.round((1 - avgCur / avgOrig) * 100)
-        if (disc < 0) disc = 0
-        if (disc > 99) disc = 99
       }
       return {
         id,
@@ -107,7 +105,7 @@ function processBundle(catalog, v1models) {
         badge: 'Std',
         input: inp,
         output: out,
-        discount: disc,
+        discount: clampDisc(disc),
         ctx: v1.context_length ?? null,
       }
     })
@@ -120,6 +118,28 @@ function processBundle(catalog, v1models) {
       if (b.discount == null) return -1
       return (b.discount ?? 0) - (a.discount ?? 0)
     })
+
+  // Surface any :free model whose base isn't in the curated catalog. The
+  // terminal lists all of /v1/models, but the catalog only carries a subset;
+  // free models like upstage/solar-pro4:free would otherwise never appear.
+  const catalogBaseIds = new Set(rows.map(r => r.id))
+  for (const m of v1models.data) {
+    if (!m.id.endsWith(':free')) continue
+    const base = m.id.slice(0, -':free'.length)
+    if (catalogBaseIds.has(base)) continue
+    rows.push({
+      id: base,
+      selectableId: m.id,
+      name: base.split('/').pop(),
+      provider: base.split('/')[0],
+      tier: 'free',
+      badge: 'Free',
+      input: num(m.pricing?.prompt),
+      output: num(m.pricing?.completion),
+      discount: null,
+      ctx: m.context_length ?? null,
+    })
+  }
 
   const freeCount = rows.filter(r => r.tier === 'free').length
   const discounts = rows.map(r => r.discount).filter(v => v != null)
