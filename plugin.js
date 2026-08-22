@@ -38,8 +38,14 @@ function processBundle(catalog, v1models) {
   const nous = catalog?.providers?.nous?.models
   const catalogRows = Array.isArray(nous) ? nous : []
 
-  // derive tier from the :free counterpart
-  const isFree = (id) => byId.has(id + ':free')
+  // derive tier from the :free counterpart OR literal $0 pricing on the
+  // base ID itself (some models, e.g. stealth/ox-alpha, are simply listed
+  // at 0 with no :free variant at all).
+  const num0 = (x) => { const n = Number(x); return Number.isFinite(n) ? n === 0 : false }
+  const isFree = (id) => byId.has(id + ':free') || (() => {
+    const base = byId.get(id)
+    return !!base && num0(base.pricing?.prompt) && num0(base.pricing?.completion)
+  })()
 
   const num = (x) => { const n = Number(x); return Number.isFinite(n) ? n : null }
   const clampDisc = (d) => { if (d == null) return null; if (d < 0) return 0; if (d > 99) return 99; return d }
@@ -53,8 +59,11 @@ function processBundle(catalog, v1models) {
         // A :free variant exists: the selectable ID is actually the :free one,
         // and the displayed pricing should come from that ($0) entry so the
         // Free badge and the submitted model stay consistent.
-        const v1 = freeEntry
+        // If there's no :free variant, the BASE id itself is free-priced
+        // (e.g. stealth/ox-alpha): selectable id and pricing come from it.
+        const v1 = freeEntry ?? byId.get(id)
         if (!v1) return null
+        const selectable = freeEntry ? freeVar : id
         const inp = num(v1.pricing?.prompt)
         const out = num(v1.pricing?.completion)
         const origPrompt = num(v1.pricing?.original?.prompt)
@@ -72,7 +81,7 @@ function processBundle(catalog, v1models) {
         }
         return {
           id,
-          selectableId: freeVar,
+          selectableId: selectable,
           name: id.split('/').pop(),
           provider: id.split('/')[0],
           tier: 'free',
@@ -152,8 +161,20 @@ function processBundle(catalog, v1models) {
 // Use the focused tile when there is one; fall back to the primary active
 // runtime. This is the same targeting rule used by the desktop model picker.
 function getRuntimeId() {
-  try { return host.state.focusedSessionId?.get?.() ?? host.state.focusedSessionId ?? null } catch {}
-  try { return host.state.activeSessionId?.get?.() ?? host.state.activeSessionId ?? null } catch {}
+  // host.state.* are readonly atoms: .get() returns the value. Never pass an
+  // atom itself as session_id — the gateway keys sessions in a dict keyed by
+  // that string and crashes with "unhashable type" on a non-string.
+  const asId = (v) => (typeof v === 'string' && v ? v : null)
+  try {
+    const s = host.state.focusedSessionId
+    const v = typeof s?.get === 'function' ? s.get() : s
+    if (asId(v)) return v
+  } catch {}
+  try {
+    const s = host.state.activeSessionId
+    const v = typeof s?.get === 'function' ? s.get() : s
+    if (asId(v)) return v
+  } catch {}
   return null
 }
 
