@@ -1,9 +1,10 @@
 /**
  * Hermes Desktop Plugin: Nous Models & Pricing
  *
- * Statusbar chip shows a live model count. Click it -> a popup panel
- * lists every Nous Portal model with current + original pricing, the
- * discount percent, and a "now" tag for the live session model.
+ * Statusbar chip opens a popup listing every Nous Portal model with current
+ * pricing, original pricing and the discount percent. Per-row actions:
+ *   - click a row  -> switch the FOCUSED chat's session model
+ *   - "default"    -> pin the model as this profile's default (new sessions)
  *
  * No sidebar pane. No build step. No Python backend.
  * Fetches live data from the Nous Portal directly.
@@ -11,13 +12,17 @@
 
 import * as React from 'react'
 import { jsx } from 'react/jsx-runtime'
-import { host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, Codicon, haptic } from '@hermes/plugin-sdk'
+import {
+  host, Popover, PopoverContent, PopoverTrigger, STATUSBAR_AREAS, Codicon, haptic,
+  surfaceModelSwitchConfirm
+} from '@hermes/plugin-sdk'
 const { useState, useEffect, useCallback } = React
 
 // ---- Constants ----
 const PANEL_W = 680
 const ROW_H = 38
 const BODY_H = 300
+const PROVIDER = 'nous'
 
 // ---- API helpers ----
 async function fetchJSON(url) {
@@ -35,7 +40,7 @@ function buildModelBundle() {
 
 function processBundle(catalog, v1models) {
   const byId = new Map(v1models.data.map(m => [m.id, m]))
-  const nous = catalog?.providers?.nous?.models
+  const nous = catalog?.providers?.[PROVIDER]?.models
   const catalogRows = Array.isArray(nous) ? nous : []
 
   // derive tier from the :free counterpart OR literal $0 pricing on the
@@ -157,43 +162,75 @@ function processBundle(catalog, v1models) {
   return { models: rows, freeCount, total: rows.length, avgDiscount: avgDisc, fetchedAt: Date.now() }
 }
 
-// ---- Focused runtime id ----
+// ---- Focused runtime id / profile name ----
 // Use the focused tile when there is one; fall back to the primary active
 // runtime. This is the same targeting rule used by the desktop model picker.
-function getRuntimeId() {
+function readAtom(atom) {
   // host.state.* are readonly atoms: .get() returns the value. Never pass an
   // atom itself as session_id — the gateway keys sessions in a dict keyed by
   // that string and crashes with "unhashable type" on a non-string.
-  const asId = (v) => (typeof v === 'string' && v ? v : null)
   try {
-    const s = host.state.focusedSessionId
-    const v = typeof s?.get === 'function' ? s.get() : s
-    if (asId(v)) return v
-  } catch {}
-  try {
-    const s = host.state.activeSessionId
-    const v = typeof s?.get === 'function' ? s.get() : s
-    if (asId(v)) return v
-  } catch {}
-  return null
+    const v = typeof atom?.get === 'function' ? atom.get() : atom
+    return typeof v === 'string' && v ? v : null
+  } catch {
+    return null
+  }
 }
 
-// The popup intentionally does not mark any row as "now". The desktop's
-// composer model is sticky UI state and session.info events are asynchronous;
-// showing a possibly stale highlight is worse than leaving the list neutral.
+function getRuntimeId() {
+  return readAtom(host.state.focusedSessionId) || readAtom(host.state.activeSessionId)
+}
 
-// ---- Switch model via gateway RPC (same path the app's own picker uses) ----
-async function setModel({ model, scope = 'session' }) {
-  const provider = 'nous'
+/** The profile whose config holds the default model: the focused chat's owner,
+ *  else the gateway socket's own profile. */
+function getProfileName() {
+  return readAtom(host.state.focusedSessionProfile) || readAtom(host.state.profile) || 'default'
+}
+
+// The popup intentionally does not mark any row as "now": the composer model
+// is sticky UI state and session.info events are asynchronous, so a possibly
+// stale highlight is worse than a neutral list.
+
+// ---- Switch the FOCUSED chat's session model ----
+// The composer picker's own wire: `config.set key=model`, value
+// `<model> --provider <id> --session`. The shared gateway turns that into its
+// revision-fenced `session.mutate` model operation (it refuses `model` as a
+// config write), so this stays the one supported door for a session switch.
+function requestSessionSwitch(modelId, confirmExpensive) {
   const sid = getRuntimeId()
-  const rawValue = scope === 'global'
-    ? `${model} --provider ${provider} --global`
-    : `${model} --provider ${provider} --session`
-  const params = { key: 'model', value: rawValue }
-  if (sid) params.session_id = sid
-  const res = await host.request('config.set', params)
-  // config.set returns { value, deferred?, scope? } on success
-  return res
+  if (!sid) throw new Error('Open a chat first — a session model needs a live session')
+  const params = { session_id: sid, key: 'model', value: `${modelId} --provider ${PROVIDER} --session` }
+  if (confirmExpensive) params.confirm_expensive_model = true
+  return host.request('config.set', params)
+}
+
+// ---- Pin the PROFILE default ----
+// `config.set key=model` can never write config.yaml on the shared gateway
+// (and `--global` is not even a picker value the app translates), so the
+// profile-default door is `profiles.configure` — the call the Bots editor and
+// the settings model surfaces use. It honours the expensive/data-policy guard
+// with the same `confirm_expensive_model` handshake.
+function requestDefaultSwitch(modelId, confirmExpensive) {
+  const params = { name: getProfileName(), model: modelId, provider: PROVIDER }
+  if (confirmExpensive) params.confirm_expensive_model = true
+  return host.request('profiles.configure', params)
+}
+
+/** Run one pick, routing a guarded (`confirm_required`) answer through the
+ *  app's shared confirm dialog and resending only on a confirmed yes.
+ *  Resolves the applied result, or null when declined/failed (the shared
+ *  applier already toasted the failure). */
+async function applyPick({ request, modelId, failureMessage }) {
+  const first = await request(false)
+  if (!first?.confirm_required) return first ?? { ok: true }
+
+  const applied = await surfaceModelSwitchConfirm({
+    confirmMessage: first.confirm_message,
+    failureMessage,
+    model: modelId,
+    requestConfirmed: () => request(true),
+  })
+  return applied ? { ok: true, applied: true } : null
 }
 
 // ---- Sound via haptic (same mechanism the app uses for native tap feedback) ----
@@ -211,7 +248,7 @@ function fmtPrice(p) {
 }
 
 // ---- Component: one model row ----
-function ModelRow({ model, onSetDefault, onSetSession }) {
+function ModelRow({ model, busy, onSetDefault, onSetSession }) {
   const rowStyle = {
     display: 'flex',
     alignItems: 'center',
@@ -222,6 +259,8 @@ function ModelRow({ model, onSetDefault, onSetSession }) {
     cursor: 'pointer',
     backgroundColor: 'transparent',
     transition: 'background-color 80ms',
+    opacity: busy ? 0.6 : 1,
+    pointerEvents: busy ? 'none' : 'auto',
   }
   const nameStyle = {
     flex: '1 1 auto',
@@ -256,14 +295,15 @@ function ModelRow({ model, onSetDefault, onSetSession }) {
       tap()
       try {
         const res = await onSetSession(model.selectableId)
-        if (res?.deferred) {
+        if (!res) return // declined, or failed with its own toast
+        if (res.deferred) {
           host.notify({ kind: 'info', message: `Session model -> ${model.selectableId} (applies next turn)` })
         }
       } catch (err) {
         host.notify({ kind: 'error', message: `Session model switch failed: ${err.message}` })
       }
     },
-    title: `Set "${model.id}" as current session model`,
+    title: `Set "${model.id}" as the focused chat's model`,
     children: [
       jsx('span', { style: model.tier === 'free' ? badgeFree : badgeStd, children: model.badge }),
       jsx('span', { style: nameStyle, children: model.name }),
@@ -294,14 +334,13 @@ function ModelRow({ model, onSetDefault, onSetSession }) {
               tap()
               try {
                 const res = await onSetDefault(model.id)
-                if (res?.deferred) {
-                  host.notify({ kind: 'info', message: `Default model -> ${model.id} (applies to new sessions)` })
-                }
+                if (!res) return // declined, or failed with its own toast
+                host.notify({ kind: 'info', message: `Default model -> ${model.id} (new sessions)` })
               } catch (err) {
                 host.notify({ kind: 'error', message: `Default model switch failed: ${err.message}` })
               }
             },
-            title: `Set "${model.id}" as profile default`,
+            title: `Set "${model.id}" as the profile default`,
             children: 'default'
           }),
     ]
@@ -314,6 +353,7 @@ function NousPopup() {
   const [bundle, setBundle] = useState(null)
   const [error, setError] = useState(null)
   const [refreshing, setRefreshing] = useState(false)
+  const [busyRow, setBusyRow] = useState(null)
 
   // The popup list is intentionally neutral: no stale "now" highlight.
   // The model switch actions remain available on every row.
@@ -343,10 +383,33 @@ function NousPopup() {
 
   // Actions
   const onSetDefault = useCallback(async (modelId) => {
-    return await setModel({ model: modelId, scope: 'global' })
+    setBusyRow(modelId)
+    try {
+      return await applyPick({
+        request: (confirm) => requestDefaultSwitch(modelId, confirm),
+        modelId,
+        failureMessage: 'Default model switch failed',
+      })
+    } finally {
+      setBusyRow(null)
+    }
   }, [])
+
   const onSetSession = useCallback(async (modelId) => {
-    return await setModel({ model: modelId, scope: 'session' })
+    if (!getRuntimeId()) {
+      host.notify({ kind: 'info', message: 'Open a chat first — no live session to switch' })
+      return null
+    }
+    setBusyRow(modelId)
+    try {
+      return await applyPick({
+        request: (confirm) => requestSessionSwitch(modelId, confirm),
+        modelId,
+        failureMessage: 'Session model switch failed',
+      })
+    } finally {
+      setBusyRow(null)
+    }
   }, [])
 
   const contentStyle = {
@@ -397,7 +460,14 @@ function NousPopup() {
     }),
     jsx(PopoverContent, {
       align: 'end', sideOffset: 6, style: contentStyle,
+      // The composer restores focus to its editor on the next pointermove over
+      // the chat area (composer/floating-target.ts), and Radix dismisses a
+      // popover whose focus moved outside it — which is why the panel used to
+      // vanish the instant the pointer left the chip, gap or no gap. Keep focus
+      // where it is (the caret stays in the composer) and ignore focus loss:
+      // an outside click, Escape, or a second click on the chip still close it.
       onOpenAutoFocus: (e) => e.preventDefault(),
+      onFocusOutside: (e) => e.preventDefault(),
       children: [
         jsx('div', { style: headerStyle, children: [
           jsx('span', { style: titleStyle, children: 'Nous Portal Models' }),
@@ -426,6 +496,7 @@ function NousPopup() {
                 jsx(ModelRow, {
                   key: m.id,
                   model: m,
+                  busy: busyRow === m.id,
                   onSetDefault,
                   onSetSession,
                 })
