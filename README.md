@@ -36,8 +36,23 @@ Each model row is clickable:
 - **Hover a row → click `default`** → sets it as the **profile default model**
   (applies to new sessions).
 
-Both use the same `config.set` gateway RPC the app's own model picker uses, so
-the switch behaves exactly like selecting from the built-in model menu.
+Both go through the gateway the same way the app's own model picker does, so a
+switch behaves exactly like picking from the built-in model menu:
+
+- The session pick uses `config.set key=model` with the composer picker's value
+  (`<model> --provider nous --session`). The gateway turns that into its
+  revision-fenced model mutation — it refuses `model` as a plain config write.
+- The profile default uses `profiles.configure` (the call the Bots editor and
+  the settings model screens use), because a model pick can never write
+  `config.yaml` on the shared gateway.
+
+If the gateway guards a model (expensive, or a data-policy warning), nothing is
+applied until you confirm: the plugin shows the app's standard "Switch anyway"
+dialog and only then resends the pick with the confirmation flag. Without that
+step the switch would silently do nothing.
+
+The popup stays open while you move the mouse to it, and closes on an outside
+click, Escape, or a second click on the statusbar chip.
 
 ## Data sources (public, CORS-enabled — fetched by the plugin directly)
 
